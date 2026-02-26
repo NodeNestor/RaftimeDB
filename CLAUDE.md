@@ -115,6 +115,50 @@ curl http://localhost:4003/cluster/status
 # Connect your client to ws://localhost:3001 (or :3002, :3003)
 ```
 
+## Scaling the Cluster
+
+RaftTimeDB supports **dynamic scaling** — add or remove nodes while the cluster is live. No downtime required.
+
+### Adding Nodes
+
+1. Start a new SpacetimeDB instance + RaftTimeDB proxy (with a unique `RTDB_NODE_ID`)
+2. Publish the same module to the new SpacetimeDB instance
+3. Add it to the Raft cluster:
+```bash
+rtdb add-node --node-id 4 --addr new-host:4001 --cluster http://existing-node:4001
+```
+
+The new node automatically syncs: it receives the Raft log from the leader, catches up, and becomes a voting member.
+
+### Removing Nodes
+
+**Always remove from Raft before stopping the container.** Never remove the current leader — remove followers first.
+
+```bash
+rtdb remove-node --node-id 4 --cluster http://existing-node:4001
+# Then stop the node
+```
+
+### Quorum Rules
+
+Always run an **odd number** of nodes for proper majority quorum:
+
+| Nodes | Quorum needed | Tolerates failures | Use case |
+|-------|--------------|-------------------|----------|
+| 3     | 2            | 1                 | Dev / small prod |
+| 5     | 3            | 2                 | Production |
+| 7     | 4            | 3                 | High availability |
+
+### Docker Compose Scaling
+
+For local dev, each new node needs two docker-compose services added:
+- `stdb-N` (SpacetimeDB on port `5000+N`)
+- `node-N` (RaftTimeDB proxy, WS on `3000+N`, Raft on `4000+N`)
+
+Start only the new containers with `docker compose up -d stdb-N node-N` — existing nodes stay running.
+
+See `/scale` Claude skill for step-by-step automation.
+
 ## Can I Do Everything I Can With Normal SpacetimeDB?
 
 **Short answer: yes, for runtime operations.**
