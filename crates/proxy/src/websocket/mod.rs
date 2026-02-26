@@ -6,6 +6,7 @@ use crate::raft::RaftNode;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tracing::{error, info};
 
 /// The WebSocket proxy that sits between clients and SpacetimeDB.
@@ -21,13 +22,17 @@ use tracing::{error, info};
 pub struct Proxy {
     config: NodeConfig,
     raft: Arc<RaftNode>,
+    /// Broadcasts the database path (e.g. "/database/subscribe/mydb") to the
+    /// forwarder task so it can connect to SpacetimeDB with the correct URL.
+    db_path_tx: watch::Sender<String>,
 }
 
 impl Proxy {
-    pub fn new(config: NodeConfig, raft: RaftNode) -> Self {
+    pub fn new(config: NodeConfig, raft: RaftNode, db_path_tx: watch::Sender<String>) -> Self {
         Self {
             config,
             raft: Arc::new(raft),
+            db_path_tx,
         }
     }
 
@@ -39,9 +44,10 @@ impl Proxy {
             let (stream, addr) = listener.accept().await?;
             let raft = self.raft.clone();
             let stdb_url = self.config.stdb_url.clone();
+            let db_path_tx = self.db_path_tx.clone();
 
             tokio::spawn(async move {
-                match handler::handle_client(stream, raft, &stdb_url).await {
+                match handler::handle_client(stream, raft, &stdb_url, db_path_tx).await {
                     Ok(()) => info!(%addr, "Client disconnected"),
                     Err(e) => error!(%addr, error = %e, "Client connection error"),
                 }

@@ -77,16 +77,34 @@ async fn main() -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, Vec<u8>)>();
     raft_node.state_machine.set_forwarder(tx);
 
-    // Spawn forwarder task: reads committed writes from the state machine
-    // and sends them to the local SpacetimeDB. Skips writes that originated
-    // on this node (those are already forwarded by the handler).
+    // Watch channel: the first client connection broadcasts the database path
+    // (e.g. "/database/subscribe/mydb") so the forwarder knows what URL to use.
+    let (db_path_tx, mut db_path_rx) = tokio::sync::watch::channel(String::new());
+
+    // Spawn forwarder task: waits for the database path from the first client,
+    // then connects to SpacetimeDB and forwards committed writes from other nodes.
     let self_node_id = config.node_id;
     let stdb_url_for_forwarder = config.stdb_url.clone();
     tokio::spawn(async move {
+        // Wait until a client connects and we learn the database path
         loop {
-            match tokio_tungstenite::connect_async(&stdb_url_for_forwarder).await {
+            if db_path_rx.changed().await.is_err() {
+                return; // sender dropped
+            }
+            let path = db_path_rx.borrow().clone();
+            if !path.is_empty() {
+                info!(path = %path, "Forwarder: received database path from client");
+                break;
+            }
+        }
+
+        let db_path = db_path_rx.borrow().clone();
+        let full_url = format!("{}{}", stdb_url_for_forwarder, db_path);
+
+        loop {
+            match tokio_tungstenite::connect_async(&full_url).await {
                 Ok((ws, _)) => {
-                    info!("Forwarder connected to SpacetimeDB");
+                    info!(url = %full_url, "Forwarder connected to SpacetimeDB");
                     let (mut ws_tx, _ws_rx): (futures_util::stream::SplitSink<_, Message>, _) = ws.split();
 
                     while let Some((origin_node_id, data)) = rx.recv().await {
@@ -103,7 +121,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    warn!(error = %e, "Forwarder: SpacetimeDB connect failed, retrying in 1s");
+                    warn!(error = %e, url = %full_url, "Forwarder: SpacetimeDB connect failed, retrying in 1s");
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
@@ -126,7 +144,7 @@ async fn main() -> Result<()> {
     });
 
     // Start the WebSocket proxy
-    let proxy = websocket::Proxy::new(config, raft_node);
+    let proxy = websocket::Proxy::new(config, raft_node, db_path_tx);
     proxy.run().await?;
 
     Ok(())

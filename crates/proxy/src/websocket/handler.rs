@@ -1,11 +1,12 @@
 use crate::raft::RaftNode;
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// SpacetimeDB v2 WebSocket protocol BSATN tag bytes.
 /// These are the first byte of the binary message, indicating the ClientMessage variant.
@@ -68,8 +69,8 @@ pub fn is_known_tag(tag: u8) -> bool {
 
 /// Handle a single client WebSocket connection.
 ///
-/// 1. Accept the client's WebSocket upgrade
-/// 2. Open a corresponding connection to the local SpacetimeDB
+/// 1. Accept the client's WebSocket upgrade, extracting the request path
+/// 2. Open a corresponding connection to the local SpacetimeDB using the same path
 /// 3. For each message from the client:
 ///    - Classify via `classify_message` (reads one byte)
 ///    - Write → propose through Raft, then forward
@@ -79,12 +80,36 @@ pub async fn handle_client(
     stream: TcpStream,
     raft: Arc<RaftNode>,
     stdb_url: &str,
+    db_path_tx: tokio::sync::watch::Sender<String>,
 ) -> Result<()> {
-    let client_ws = tokio_tungstenite::accept_async(stream).await?;
+    // Extract the request URI path during the WebSocket handshake.
+    // SpacetimeDB requires a path like /database/subscribe/MODULE_NAME.
+    let path_holder: Arc<StdMutex<String>> = Arc::new(StdMutex::new(String::new()));
+    let path_for_cb = path_holder.clone();
+
+    let client_ws = tokio_tungstenite::accept_hdr_async(
+        stream,
+        move |req: &http::Request<()>, resp: http::Response<()>|
+            -> Result<http::Response<()>, http::Response<Option<String>>> {
+            let uri_path = req.uri().path_and_query()
+                .map(|pq| pq.as_str().to_string())
+                .unwrap_or_else(|| "/".to_string());
+            *path_for_cb.lock().unwrap() = uri_path;
+            Ok(resp)
+        },
+    ).await?;
+
+    let request_path = path_holder.lock().unwrap().clone();
+    let upstream_url = format!("{}{}", stdb_url, request_path);
+    info!(path = %request_path, upstream = %upstream_url, "Client connected, opening upstream");
+
+    // Broadcast the database path so the forwarder can connect too
+    let _ = db_path_tx.send(request_path);
+
     let (client_tx, mut client_rx) = client_ws.split();
     let client_tx = Arc::new(Mutex::new(client_tx));
 
-    let (upstream_ws, _) = tokio_tungstenite::connect_async(stdb_url).await?;
+    let (upstream_ws, _) = tokio_tungstenite::connect_async(&upstream_url).await?;
     let (upstream_tx, mut upstream_rx) = upstream_ws.split();
     let upstream_tx = Arc::new(Mutex::new(upstream_tx));
 
