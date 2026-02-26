@@ -31,3 +31,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 # HTTP server for Raft RPCs and management API
 axum.workspace = true
+redb = "3.1.0"
+
+[dev-dependencies]
+tempfile = "3.26.0"

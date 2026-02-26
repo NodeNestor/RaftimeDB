@@ -55,10 +55,13 @@ services:
       RTDB_RAFT_ADDR: "0.0.0.0:4001"
       RTDB_STDB_URL: "ws://stdb-1:3000"
       RTDB_PEERS: "2=node-2:4001,3=node-3:4001"
+      RTDB_DATA_DIR: "/data"
       RUST_LOG: "rafttimedb=info,openraft=warn"
     ports:
       - "3001:3001"
       - "4001:4001"
+    volumes:
+      - raft-data-1:/data
     depends_on:
       - stdb-1
     networks:
@@ -74,10 +77,13 @@ services:
       RTDB_RAFT_ADDR: "0.0.0.0:4001"
       RTDB_STDB_URL: "ws://stdb-2:3000"
       RTDB_PEERS: "1=node-1:4001,3=node-3:4001"
+      RTDB_DATA_DIR: "/data"
       RUST_LOG: "rafttimedb=info,openraft=warn"
     ports:
       - "3002:3001"
       - "4002:4001"
+    volumes:
+      - raft-data-2:/data
     depends_on:
       - stdb-2
     networks:
@@ -93,10 +99,13 @@ services:
       RTDB_RAFT_ADDR: "0.0.0.0:4001"
       RTDB_STDB_URL: "ws://stdb-3:3000"
       RTDB_PEERS: "1=node-1:4001,2=node-2:4001"
+      RTDB_DATA_DIR: "/data"
       RUST_LOG: "rafttimedb=info,openraft=warn"
     ports:
       - "3003:3001"
       - "4003:4001"
+    volumes:
+      - raft-data-3:/data
     depends_on:
       - stdb-3
     networks:
@@ -106,6 +115,9 @@ volumes:
   stdb-data-1:
   stdb-data-2:
   stdb-data-3:
+  raft-data-1:
+  raft-data-2:
+  raft-data-3:
 
 networks:
   raft-net:

@@ -1,5 +1,6 @@
 mod log_store;
 mod network;
+mod persistent_log_store;
 pub mod state_machine;
 pub mod types;
 
@@ -50,15 +51,20 @@ impl RaftNode {
         };
         let raft_config = Arc::new(raft_config.validate()?);
 
-        let log_store = log_store::LogStore::new();
         let state_machine = StateMachineStore::new();
         let network = network::NetworkFactory::new();
+
+        // Use persistent log store when data_dir is configured.
+        // The persistent store survives restarts — critical for production.
+        let persistent_store = persistent_log_store::PersistentLogStore::new(
+            std::path::Path::new(&config.data_dir),
+        )?;
 
         let raft = Raft::new(
             config.node_id,
             raft_config,
             network,
-            log_store,
+            persistent_store,
             state_machine.clone(),
         )
         .await?;

@@ -242,7 +242,8 @@ crates/
       types.rs           ← ReducerCallRequest/Response, TypeConfig
       network.rs         ← HTTP transport (reqwest → POST /raft/*)
       state_machine.rs   ← Apply committed entries, snapshots, forwarder channel
-      log_store.rs       ← In-memory Raft log (TODO: RocksDB for production)
+      log_store.rs       ← In-memory Raft log (kept for reference/testing)
+      persistent_log_store.rs ← Persistent Raft log using redb (production)
     websocket/
       mod.rs             ← Proxy: accepts client connections
       handler.rs         ← Message classification (1-byte tag), client↔SpacetimeDB routing
@@ -271,12 +272,13 @@ tests/
 - **Opaque blob replication** — entire WebSocket message replicated, no BSATN parsing needed
 - **origin_node_id dedup** — each Raft entry records which node proposed it; the forwarder skips entries from the local node (handler already forwarded them)
 - **Metadata-only snapshots** — SpacetimeDB is the source of truth; snapshots store last_applied + membership
+- **Persistent log store** — redb (pure Rust) stores Raft log + vote on disk; survives restarts
 
 ## Development
 
 ```bash
 cargo build                    # Build both crates
-cargo test                     # Run all 42 tests
+cargo test                     # Run all 47 tests
 cargo build --release          # Release build
 cargo install --path crates/cli   # Install rtdb CLI
 RUST_LOG=rafttimedb=debug cargo run --bin rafttimedb -- --node-id 1 ...  # Debug logging
@@ -300,9 +302,51 @@ RUST_LOG=rafttimedb=debug cargo run --bin rafttimedb -- --node-id 1 ...  # Debug
 
 Tests: containers running, API reachable, cluster bootstrap, leader election, write forwarding, fault tolerance (kill node, re-election), node rejoin.
 
+## Production Deployment
+
+For deploying across multiple servers, use the `/production-deploy` Claude skill. Key points:
+
+### What each server needs
+1. SpacetimeDB instance (port 3000, localhost only)
+2. RaftTimeDB proxy binary (WS: 3001, Raft API: 4001)
+3. The same module published to every SpacetimeDB instance
+
+### Load Balancer (EXTERNAL — not part of RaftTimeDB)
+
+Put a load balancer in front of the WebSocket ports (3001) so clients connect to one URL. RaftTimeDB handles routing internally — any node can accept reads and writes.
+
+**nginx example:**
+```nginx
+upstream rafttimedb {
+    server server-a:3001;
+    server server-b:3001;
+    server server-c:3001;
+}
+server {
+    listen 443 ssl;
+    location / {
+        proxy_pass http://rafttimedb;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+**Cloud:** Use a Network Load Balancer (AWS NLB, GCP TCP LB, Azure LB) pointed at port 3001. Health check: `GET http://{node}:4001/cluster/status` returns 200.
+
+### Persistence
+
+Raft log is stored on disk at `{RTDB_DATA_DIR}/raft-log.redb` using redb (pure Rust, ACID). Nodes survive restarts and rejoin the cluster automatically.
+
+### Monitoring
+
+- `rtdb status --addr http://{node}:4001` — cluster health
+- `journalctl -u rafttimedb -f` — live logs (with systemd)
+- Watch for: frequent leader changes, high term numbers, nodes stuck as Learner
+
 ## Known Limitations / Next Steps
 
-- **In-memory log store** — Raft log is lost on restart. Need RocksDB for production persistence.
 - **No module deployment replication** — you must `spacetime publish` to each instance separately. A future version could proxy the SpacetimeDB HTTP API too.
 - **No client reconnection** — if a node dies, connected clients get disconnected. They need to reconnect to another node. A load balancer in front solves this.
 - **No Prometheus metrics** — monitoring is via `rtdb status` only.
