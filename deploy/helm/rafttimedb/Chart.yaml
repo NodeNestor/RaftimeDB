@@ -1,0 +1,15 @@
+apiVersion: v2
+name: rafttimedb
+description: Distributed fault-tolerant clustering for SpacetimeDB
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - spacetimedb
+  - raft
+  - distributed
+  - database
+  - clustering
+home: https://github.com/YOUR_ORG/RaftTimeDB
+sources:
+  - https://github.com/YOUR_ORG/RaftTimeDB

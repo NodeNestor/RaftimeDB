@@ -1,0 +1,99 @@
+# Local development: 3-node RaftTimeDB cluster with 3 SpacetimeDB instances.
+# Usage: docker compose up
+#
+# This gives you a fully functional 3-node Raft cluster locally.
+# Connect your SpacetimeDB client to any node on ports 3001-3003.
+# Management API available on ports 4001-4003.
+#
+# After startup, bootstrap the cluster:
+#   rtdb init --nodes 1=node-1:4001 2=node-2:4001 3=node-3:4001
+
+services:
+  # --- SpacetimeDB instances (one per node) ---
+  stdb-1:
+    image: clockworklabs/spacetime:latest
+    command: start --listen-addr 0.0.0.0:3000
+    volumes:
+      - stdb-data-1:/app/data
+    networks:
+      - raft-net
+
+  stdb-2:
+    image: clockworklabs/spacetime:latest
+    command: start --listen-addr 0.0.0.0:3000
+    volumes:
+      - stdb-data-2:/app/data
+    networks:
+      - raft-net
+
+  stdb-3:
+    image: clockworklabs/spacetime:latest
+    command: start --listen-addr 0.0.0.0:3000
+    volumes:
+      - stdb-data-3:/app/data
+    networks:
+      - raft-net
+
+  # --- RaftTimeDB proxy nodes ---
+  node-1:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    environment:
+      RTDB_NODE_ID: "1"
+      RTDB_LISTEN_ADDR: "0.0.0.0:3001"
+      RTDB_RAFT_ADDR: "0.0.0.0:4001"
+      RTDB_STDB_URL: "ws://stdb-1:3000"
+      RTDB_PEERS: "2=node-2:4001,3=node-3:4001"
+    ports:
+      - "3001:3001"
+      - "4001:4001"
+    depends_on:
+      - stdb-1
+    networks:
+      - raft-net
+
+  node-2:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    environment:
+      RTDB_NODE_ID: "2"
+      RTDB_LISTEN_ADDR: "0.0.0.0:3001"
+      RTDB_RAFT_ADDR: "0.0.0.0:4001"
+      RTDB_STDB_URL: "ws://stdb-2:3000"
+      RTDB_PEERS: "1=node-1:4001,3=node-3:4001"
+    ports:
+      - "3002:3001"
+      - "4002:4001"
+    depends_on:
+      - stdb-2
+    networks:
+      - raft-net
+
+  node-3:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    environment:
+      RTDB_NODE_ID: "3"
+      RTDB_LISTEN_ADDR: "0.0.0.0:3001"
+      RTDB_RAFT_ADDR: "0.0.0.0:4001"
+      RTDB_STDB_URL: "ws://stdb-3:3000"
+      RTDB_PEERS: "1=node-1:4001,2=node-2:4001"
+    ports:
+      - "3003:3001"
+      - "4003:4001"
+    depends_on:
+      - stdb-3
+    networks:
+      - raft-net
+
+volumes:
+  stdb-data-1:
+  stdb-data-2:
+  stdb-data-3:
+
+networks:
+  raft-net:
+    driver: bridge

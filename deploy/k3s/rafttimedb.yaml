@@ -1,0 +1,136 @@
+# RaftTimeDB on K3s/K8s — 3-node cluster
+#
+# Usage:
+#   kubectl apply -f rafttimedb.yaml
+#
+# This creates:
+#   - StatefulSet with 3 pods (each running RaftTimeDB + SpacetimeDB)
+#   - Headless service for Raft peer discovery
+#   - LoadBalancer service for client connections
+#
+# Connect your SpacetimeDB client to the LoadBalancer IP on port 3001.
+
+---
+# Headless service for stable DNS names used by Raft
+apiVersion: v1
+kind: Service
+metadata:
+  name: rafttimedb-raft
+  labels:
+    app: rafttimedb
+spec:
+  clusterIP: None
+  selector:
+    app: rafttimedb
+  ports:
+    - port: 4001
+      name: raft
+
+---
+# Client-facing service
+apiVersion: v1
+kind: Service
+metadata:
+  name: rafttimedb
+  labels:
+    app: rafttimedb
+spec:
+  type: LoadBalancer
+  selector:
+    app: rafttimedb
+  ports:
+    - port: 3001
+      name: ws
+      targetPort: 3001
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rafttimedb
+spec:
+  serviceName: rafttimedb-raft
+  replicas: 3
+  selector:
+    matchLabels:
+      app: rafttimedb
+  template:
+    metadata:
+      labels:
+        app: rafttimedb
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        # RaftTimeDB proxy
+        - name: rafttimedb
+          image: ghcr.io/YOUR_ORG/rafttimedb:latest
+          ports:
+            - containerPort: 3001
+              name: ws
+            - containerPort: 4001
+              name: raft
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RTDB_NODE_ID
+              value: "$(POD_NAME)"
+            - name: RTDB_LISTEN_ADDR
+              value: "0.0.0.0:3001"
+            - name: RTDB_RAFT_ADDR
+              value: "0.0.0.0:4001"
+            - name: RTDB_STDB_URL
+              value: "ws://127.0.0.1:3000"
+            - name: RTDB_PEERS
+              value: "rafttimedb-0.rafttimedb-raft:4001,rafttimedb-1.rafttimedb-raft:4001,rafttimedb-2.rafttimedb-raft:4001"
+            - name: RTDB_DATA_DIR
+              value: "/data/raft"
+          volumeMounts:
+            - name: raft-data
+              mountPath: /data/raft
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+
+        # SpacetimeDB sidecar
+        - name: spacetimedb
+          image: clockworklabs/spacetime:latest
+          command:
+            - spacetimedb-standalone
+            - start
+            - --listen-addr
+            - "0.0.0.0:3000"
+          ports:
+            - containerPort: 3000
+              name: stdb
+          volumeMounts:
+            - name: stdb-data
+              mountPath: /app/data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+
+  volumeClaimTemplates:
+    - metadata:
+        name: raft-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+    - metadata:
+        name: stdb-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi

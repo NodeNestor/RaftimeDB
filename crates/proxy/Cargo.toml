@@ -1,0 +1,33 @@
+[package]
+name = "rafttimedb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Distributed fault-tolerant proxy for SpacetimeDB using Raft consensus"
+default-run = "rafttimedb"
+
+[[bin]]
+name = "rafttimedb"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
+openraft.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+toml.workspace = true
+
+# HTTP client for SpacetimeDB HTTP API
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# HTTP server for Raft RPCs and management API
+axum.workspace = true
