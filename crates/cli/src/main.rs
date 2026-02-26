@@ -49,6 +49,24 @@ enum Commands {
         #[arg(long, num_args = 1..)]
         nodes: Vec<String>,
     },
+
+    /// Deploy a SpacetimeDB module to all nodes in the cluster.
+    /// Runs `spacetime publish` against each SpacetimeDB instance.
+    Deploy {
+        /// Path to the SpacetimeDB module directory
+        #[arg(long)]
+        module: String,
+        /// Database name (defaults to module directory name)
+        #[arg(long)]
+        name: Option<String>,
+        /// SpacetimeDB server addresses (e.g., "http://localhost:5001")
+        #[arg(long, num_args = 1.., default_values_t = vec![
+            "http://localhost:5001".to_string(),
+            "http://localhost:5002".to_string(),
+            "http://localhost:5003".to_string(),
+        ])]
+        servers: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -147,6 +165,62 @@ async fn main() -> Result<()> {
                 let body = resp.text().await.unwrap_or_default();
                 anyhow::bail!("Add node failed: {}", body);
             }
+        }
+
+        Commands::Deploy {
+            module,
+            name,
+            servers,
+        } => {
+            let db_name = name.unwrap_or_else(|| {
+                std::path::Path::new(&module)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "my_module".to_string())
+            });
+
+            println!(
+                "Deploying module '{}' from {} to {} node(s)...",
+                db_name,
+                module,
+                servers.len()
+            );
+
+            let mut failed = 0;
+            for server in &servers {
+                print!("  Publishing to {}... ", server);
+                let result = std::process::Command::new("spacetime")
+                    .args(["publish", "--server", server, &module, &db_name])
+                    .output();
+
+                match result {
+                    Ok(output) if output.status.success() => {
+                        println!("OK");
+                    }
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        println!("FAILED: {}", stderr.trim());
+                        failed += 1;
+                    }
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            anyhow::bail!(
+                                "spacetime CLI not found. Install it: https://spacetimedb.com/install"
+                            );
+                        }
+                        println!("FAILED: {}", e);
+                        failed += 1;
+                    }
+                }
+            }
+
+            if failed > 0 {
+                anyhow::bail!(
+                    "{} node(s) failed. All nodes must have the same module.",
+                    failed
+                );
+            }
+            println!("Module '{}' deployed to all nodes!", db_name);
         }
 
         Commands::RemoveNode { node_id, cluster } => {

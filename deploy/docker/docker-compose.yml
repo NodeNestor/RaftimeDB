@@ -4,15 +4,21 @@
 # This gives you a fully functional 3-node Raft cluster locally.
 # Connect your SpacetimeDB client to any node on ports 3001-3003.
 # Management API available on ports 4001-4003.
+# SpacetimeDB HTTP ports exposed on 5001-5003 for module publishing.
 #
 # After startup, bootstrap the cluster:
 #   rtdb init --nodes 1=node-1:4001 2=node-2:4001 3=node-3:4001
+#
+# Publish modules to all nodes:
+#   ./scripts/publish-all.sh my_module_dir
 
 services:
   # --- SpacetimeDB instances (one per node) ---
   stdb-1:
     image: clockworklabs/spacetime:latest
     command: start --listen-addr 0.0.0.0:3000
+    ports:
+      - "5001:3000"
     volumes:
       - stdb-data-1:/app/data
     networks:
@@ -21,6 +27,8 @@ services:
   stdb-2:
     image: clockworklabs/spacetime:latest
     command: start --listen-addr 0.0.0.0:3000
+    ports:
+      - "5002:3000"
     volumes:
       - stdb-data-2:/app/data
     networks:
@@ -29,6 +37,8 @@ services:
   stdb-3:
     image: clockworklabs/spacetime:latest
     command: start --listen-addr 0.0.0.0:3000
+    ports:
+      - "5003:3000"
     volumes:
       - stdb-data-3:/app/data
     networks:
