@@ -111,7 +111,7 @@ impl RaftStateMachine<C> for StateMachineStore {
                 }
             }
 
-            if let EntryPayload::Normal(request) = entry.payload {
+            if let EntryPayload::Normal(request) = &entry.payload {
                 debug!(
                     log_index = log_id.index,
                     msg_len = request.raw_message.len(),
@@ -124,11 +124,12 @@ impl RaftStateMachine<C> for StateMachineStore {
                 }
 
                 if let Some(ref tx) = forwarder {
-                    let _ = tx.send((request.origin_node_id, request.raw_message));
+                    let _ = tx.send((request.origin_node_id, request.raw_message.clone()));
                 }
-
-                results.push(ReducerCallResponse { success: true });
             }
+
+            // openraft requires one response per entry (including Membership and Blank)
+            results.push(ReducerCallResponse { success: true });
         }
 
         Ok(results)
