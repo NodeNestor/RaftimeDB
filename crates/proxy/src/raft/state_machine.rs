@@ -29,7 +29,9 @@ struct SnapshotData {
 #[derive(Clone)]
 pub struct StateMachineStore {
     inner: Arc<Mutex<StateMachineInner>>,
-    forwarder: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
+    /// Channel sends (origin_node_id, raw_message). The forwarder task uses
+    /// origin_node_id to skip writes that the local handler already forwarded.
+    forwarder: Arc<Mutex<Option<mpsc::UnboundedSender<(u64, Vec<u8>)>>>>,
 }
 
 struct StateMachineInner {
@@ -57,7 +59,7 @@ impl StateMachineStore {
     }
 
     /// Set the channel used to forward committed reducer calls to SpacetimeDB.
-    pub fn set_forwarder(&self, tx: mpsc::UnboundedSender<Vec<u8>>) {
+    pub fn set_forwarder(&self, tx: mpsc::UnboundedSender<(u64, Vec<u8>)>) {
         *self.forwarder.lock().unwrap() = Some(tx);
     }
 
@@ -122,7 +124,7 @@ impl RaftStateMachine<C> for StateMachineStore {
                 }
 
                 if let Some(ref tx) = forwarder {
-                    let _ = tx.send(request.raw_message);
+                    let _ = tx.send((request.origin_node_id, request.raw_message));
                 }
 
                 results.push(ReducerCallResponse { success: true });
@@ -225,10 +227,15 @@ mod tests {
 
         {
             let forwarder = sm.forwarder.lock().unwrap();
-            forwarder.as_ref().unwrap().send(vec![3, 10, 20]).unwrap();
+            forwarder
+                .as_ref()
+                .unwrap()
+                .send((1, vec![3, 10, 20]))
+                .unwrap();
         }
 
-        let received = rx.recv().await.unwrap();
+        let (origin, received) = rx.recv().await.unwrap();
+        assert_eq!(origin, 1);
         assert_eq!(received, vec![3, 10, 20]);
     }
 

@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
+use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
-use tracing::info;
+use tokio_tungstenite::tungstenite::Message;
+use tracing::{info, warn};
 
 mod api;
 mod config;
@@ -70,8 +72,43 @@ async fn main() -> Result<()> {
     let raft_node = raft::RaftNode::new(&config).await?;
 
     // Set up the forwarder channel (state machine → SpacetimeDB)
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    // Channel carries (origin_node_id, raw_message) so we can skip writes
+    // that the local handler already forwarded to SpacetimeDB.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, Vec<u8>)>();
     raft_node.state_machine.set_forwarder(tx);
+
+    // Spawn forwarder task: reads committed writes from the state machine
+    // and sends them to the local SpacetimeDB. Skips writes that originated
+    // on this node (those are already forwarded by the handler).
+    let self_node_id = config.node_id;
+    let stdb_url_for_forwarder = config.stdb_url.clone();
+    tokio::spawn(async move {
+        loop {
+            match tokio_tungstenite::connect_async(&stdb_url_for_forwarder).await {
+                Ok((ws, _)) => {
+                    info!("Forwarder connected to SpacetimeDB");
+                    let (mut ws_tx, _ws_rx): (futures_util::stream::SplitSink<_, Message>, _) = ws.split();
+
+                    while let Some((origin_node_id, data)) = rx.recv().await {
+                        // Skip writes from this node — the handler already
+                        // forwarded them through the client's connection
+                        if origin_node_id == self_node_id {
+                            continue;
+                        }
+
+                        if let Err(e) = ws_tx.send(Message::Binary(data.into())).await {
+                            warn!(error = %e, "Forwarder: SpacetimeDB send failed, reconnecting");
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Forwarder: SpacetimeDB connect failed, retrying in 1s");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+    });
 
     // Start the HTTP management API server on the raft address
     let app_state = Arc::new(api::AppState {

@@ -7,6 +7,10 @@ use std::io::Cursor;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReducerCallRequest {
     pub raw_message: Vec<u8>,
+    /// Node that proposed this write. Used by the forwarder to avoid
+    /// double-sending: the originating node's handler already forwards
+    /// the write to SpacetimeDB, so the forwarder skips it.
+    pub origin_node_id: u64,
 }
 
 /// Response after a reducer call is committed.

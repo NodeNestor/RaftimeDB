@@ -84,6 +84,7 @@ impl RaftNode {
     pub async fn propose_write(&self, data: Vec<u8>) -> Result<()> {
         let request = ReducerCallRequest {
             raw_message: data.clone(),
+            origin_node_id: self.config.node_id,
         };
 
         match self.raft.client_write(request).await {
@@ -98,10 +99,17 @@ impl RaftNode {
                         let url = format!("http://{}/cluster/write", leader_node.addr);
                         info!(leader_addr = %leader_node.addr, "Forwarding write to leader");
 
+                        // Preserve origin_node_id so the forwarder on this node
+                        // knows to skip (handler already forwards to local SpacetimeDB)
+                        let forward_request = ReducerCallRequest {
+                            raw_message: data,
+                            origin_node_id: self.config.node_id,
+                        };
+
                         let client = reqwest::Client::new();
                         let resp = client
                             .post(&url)
-                            .json(&ReducerCallRequest { raw_message: data })
+                            .json(&forward_request)
                             .send()
                             .await
                             .map_err(|e| anyhow::anyhow!("Leader forward failed: {}", e))?;
