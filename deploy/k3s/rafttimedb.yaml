@@ -96,6 +96,20 @@ spec:
             limits:
               cpu: "1"
               memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /cluster/health
+              port: 4001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /cluster/health
+              port: 4001
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 2
 
         # SpacetimeDB sidecar
         - name: spacetimedb

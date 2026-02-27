@@ -1,3 +1,4 @@
+use crate::metrics;
 use crate::raft::RaftNode;
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
@@ -5,6 +6,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::http;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
@@ -67,6 +69,15 @@ pub fn is_known_tag(tag: u8) -> bool {
     tag <= stdb_tags::CALL_PROCEDURE
 }
 
+/// Build a close frame with leader hint for client reconnection.
+fn leader_close_frame(raft: &RaftNode) -> Option<CloseFrame> {
+    let (leader_id, leader_addr) = raft.current_leader()?;
+    Some(CloseFrame {
+        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Away,
+        reason: format!("leader={}:{}", leader_id, leader_addr).into(),
+    })
+}
+
 /// Handle a single client WebSocket connection.
 ///
 /// 1. Accept the client's WebSocket upgrade, extracting the request path
@@ -81,6 +92,22 @@ pub async fn handle_client(
     raft: Arc<RaftNode>,
     stdb_url: &str,
     db_path_tx: tokio::sync::watch::Sender<String>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    metrics::CONNECTIONS_ACTIVE.inc();
+
+    let result = handle_client_inner(stream, raft.clone(), stdb_url, db_path_tx, shutdown).await;
+
+    metrics::CONNECTIONS_ACTIVE.dec();
+    result
+}
+
+async fn handle_client_inner(
+    stream: TcpStream,
+    raft: Arc<RaftNode>,
+    stdb_url: &str,
+    db_path_tx: tokio::sync::watch::Sender<String>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     // Extract the request URI path during the WebSocket handshake.
     // SpacetimeDB requires a path like /database/subscribe/MODULE_NAME.
@@ -144,7 +171,14 @@ pub async fn handle_client(
                         break;
                     }
                 }
-                MessageKind::Read | MessageKind::PassThrough => {
+                MessageKind::Read => {
+                    metrics::READS_TOTAL.inc();
+                    if let Err(e) = upstream_tx_clone.lock().await.send(msg).await {
+                        warn!(error = %e, "Upstream send failed");
+                        break;
+                    }
+                }
+                MessageKind::PassThrough => {
                     if let Err(e) = upstream_tx_clone.lock().await.send(msg).await {
                         warn!(error = %e, "Upstream send failed");
                         break;
@@ -172,9 +206,19 @@ pub async fn handle_client(
         }
     });
 
+    // Wait for either direction to end or a shutdown signal
     tokio::select! {
         _ = inbound => {},
         _ = outbound => {},
+        _ = shutdown.changed() => {
+            info!("Shutdown signal received, closing client connection");
+            // Send close frame with leader hint for reconnection
+            if let Some(close_frame) = leader_close_frame(&raft) {
+                let _ = client_tx.lock().await
+                    .send(Message::Close(Some(close_frame)))
+                    .await;
+            }
+        },
     }
 
     Ok(())

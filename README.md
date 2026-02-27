@@ -344,27 +344,42 @@ All options can be set via CLI flags or environment variables:
 | `--stdb-url` | `RTDB_STDB_URL` | `ws://127.0.0.1:3000` | Local SpacetimeDB URL |
 | `--peers` | `RTDB_PEERS` | *required* | Comma-separated peer Raft addresses |
 | `--data-dir` | `RTDB_DATA_DIR` | `./data` | Persistent data directory |
+| `--tls-cert` | `RTDB_TLS_CERT` | *none* | Path to TLS certificate (PEM) |
+| `--tls-key` | `RTDB_TLS_KEY` | *none* | Path to TLS private key (PEM) |
+| `--tls-ca-cert` | `RTDB_TLS_CA_CERT` | *none* | CA cert for peer verification (PEM) |
+
+## Production Features
+
+RaftTimeDB includes everything needed for production deployments:
+
+- **TLS encryption** — inter-node Raft RPCs and management API served over HTTPS (`--tls-cert` + `--tls-key`)
+- **Prometheus metrics** — `GET /metrics` exposes Raft term, leader status, connections, write latency, and more
+- **Health checks** — `GET /cluster/health` returns 200 when leader is known, 503 otherwise
+- **Leader discovery** — `GET /cluster/leader` returns the current leader's address for client routing
+- **Client reconnection hints** — on graceful shutdown, WebSocket close frames include `leader=<id>:<addr>` so clients know where to reconnect
+- **Graceful shutdown** — Ctrl+C / SIGTERM triggers coordinated shutdown: drain connections, send close frames, 5-second drain period
+- **Persistent Raft log** — redb (pure Rust, ACID) stores Raft log + vote on disk; nodes survive restarts
+- **Snapshot support** — fast catch-up for new or restarted nodes
 
 ## Roadmap
 
-### Phase 1: Single-Shard Replication *(current)*
+### Phase 1: Single-Shard Replication
 - [x] WebSocket proxy with BSATN single-byte tag inspection
 - [x] Raft consensus integration (openraft)
-- [x] In-memory log store
 - [x] Docker Compose (3-node local cluster)
 - [x] GitHub Actions CI (Linux, Windows, macOS)
 - [x] Cluster bootstrap and leader election
 - [x] Persistent log store (redb — pure Rust, ACID)
 - [x] End-to-end working demo
-- [ ] TCP transport for Raft inter-node communication
 
 ### Phase 2: Production Ready
-- [ ] Snapshot support (new node catch-up from SpacetimeDB state)
-- [ ] Automatic leader redirection (client connects to follower → redirected)
-- [ ] Client reconnection on failover
-- [ ] Prometheus metrics (Raft health, connections, latency)
-- [ ] Graceful shutdown and connection draining
-- [ ] Helm chart for K8s/K3s
+- [x] TLS encryption for inter-node and client communication
+- [x] Prometheus metrics (Raft health, connections, latency)
+- [x] Snapshot support (new node catch-up)
+- [x] Client reconnection hints on failover
+- [x] Graceful shutdown and connection draining
+- [x] Health check and leader discovery endpoints
+- [x] Helm chart for K8s/K3s
 
 ### Phase 3: Horizontal Scaling (Multi-Raft)
 - [ ] Each SpacetimeDB module gets its own Raft group
@@ -389,6 +404,9 @@ All options can be set via CLI flags or environment variables:
 | WebSocket | [tokio-tungstenite](https://github.com/snapview/tokio-tungstenite) | Mature, full message inspection, zero-copy |
 | Runtime | [Tokio](https://tokio.rs) | Industry standard async runtime |
 | Protocol | BSATN (SpacetimeDB native) | One-byte classification, opaque blob replication |
+| TLS | [rustls](https://github.com/rustls/rustls) + [tokio-rustls](https://github.com/rustls/tokio-rustls) | Pure Rust TLS, no OpenSSL dependency |
+| Metrics | [prometheus](https://github.com/tikv/rust-prometheus) | Same crate TiKV uses. Text format for Grafana/etc. |
+| Persistence | [redb](https://github.com/cberner/redb) | Pure Rust embedded ACID database for Raft log |
 | K8s *(planned)* | [kube-rs](https://kube.rs) | Rust-native K8s operator framework, CNCF Sandbox |
 
 ## Design Decisions

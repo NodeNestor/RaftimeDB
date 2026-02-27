@@ -45,6 +45,7 @@ services:
       - raft-net
 
   # --- RaftTimeDB proxy nodes ---
+  # Ports: 3001-3003 (client WebSocket), 4001-4003 (Raft API + Prometheus metrics at /metrics)
   node-1:
     build:
       context: ../..
@@ -66,6 +67,12 @@ services:
       - stdb-1
     networks:
       - raft-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4001/cluster/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
 
   node-2:
     build:
@@ -88,6 +95,12 @@ services:
       - stdb-2
     networks:
       - raft-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4001/cluster/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
 
   node-3:
     build:
@@ -110,6 +123,12 @@ services:
       - stdb-3
     networks:
       - raft-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4001/cluster/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
 
 volumes:
   stdb-data-1:

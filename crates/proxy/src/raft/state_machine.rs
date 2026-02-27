@@ -1,3 +1,4 @@
+use crate::metrics;
 use crate::raft::types::{ReducerCallResponse, TypeConfig};
 use openraft::entry::EntryPayload;
 use openraft::storage::RaftStateMachine;
@@ -32,6 +33,8 @@ pub struct StateMachineStore {
     /// Channel sends (origin_node_id, raw_message). The forwarder task uses
     /// origin_node_id to skip writes that the local handler already forwarded.
     forwarder: Arc<Mutex<Option<mpsc::UnboundedSender<(u64, Vec<u8>)>>>>,
+    /// Cached snapshot for fast retrieval by new nodes.
+    cached_snapshot: Arc<Mutex<Option<Snapshot<C>>>>,
 }
 
 struct StateMachineInner {
@@ -55,6 +58,7 @@ impl StateMachineStore {
                 applied_count: 0,
             })),
             forwarder: Arc::new(Mutex::new(None)),
+            cached_snapshot: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -123,6 +127,8 @@ impl RaftStateMachine<C> for StateMachineStore {
                     inner.applied_count += 1;
                 }
 
+                metrics::ENTRIES_APPLIED.inc();
+
                 if let Some(ref tx) = forwarder {
                     let _ = tx.send((request.origin_node_id, request.raw_message.clone()));
                 }
@@ -147,7 +153,7 @@ impl RaftStateMachine<C> for StateMachineStore {
 
     async fn install_snapshot(
         &mut self,
-        _meta: &SnapshotMeta<u64, BasicNode>,
+        meta: &SnapshotMeta<u64, BasicNode>,
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<u64>> {
         let data: SnapshotData = serde_json::from_slice(snapshot.get_ref())
@@ -162,12 +168,33 @@ impl RaftStateMachine<C> for StateMachineStore {
         inner.last_membership = data.last_membership;
         inner.applied_count = data.applied_count;
 
+        // Cache the installed snapshot for future retrieval
+        let json = serde_json::to_vec(&SnapshotData {
+            last_applied: inner.last_applied,
+            last_membership: inner.last_membership.clone(),
+            applied_count: inner.applied_count,
+        }).unwrap_or_default();
+
+        *self.cached_snapshot.lock().unwrap() = Some(Snapshot {
+            meta: meta.clone(),
+            snapshot: Box::new(Cursor::new(json)),
+        });
+
         Ok(())
     }
 
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<C>>, StorageError<u64>> {
+        // Return cached snapshot if available
+        let cached = self.cached_snapshot.lock().unwrap();
+        if let Some(ref snap) = *cached {
+            let data = snap.snapshot.get_ref().clone();
+            return Ok(Some(Snapshot {
+                meta: snap.meta.clone(),
+                snapshot: Box::new(Cursor::new(data)),
+            }));
+        }
         Ok(None)
     }
 }
@@ -202,10 +229,19 @@ impl RaftSnapshotBuilder<C> for StateMachineStore {
             snapshot_id,
         };
 
-        Ok(Snapshot {
+        let snapshot = Snapshot {
+            meta: meta.clone(),
+            snapshot: Box::new(Cursor::new(json.clone())),
+        };
+
+        // Cache the snapshot we just built
+        drop(inner);
+        *self.cached_snapshot.lock().unwrap() = Some(Snapshot {
             meta,
             snapshot: Box::new(Cursor::new(json)),
-        })
+        });
+
+        Ok(snapshot)
     }
 }
 
@@ -259,5 +295,12 @@ mod tests {
         let restored: SnapshotData = serde_json::from_slice(&json).unwrap();
         assert_eq!(restored.last_applied, data.last_applied);
         assert_eq!(restored.applied_count, data.applied_count);
+    }
+
+    #[tokio::test]
+    async fn test_get_current_snapshot_initially_none() {
+        let mut sm = StateMachineStore::new();
+        let snapshot = sm.get_current_snapshot().await.unwrap();
+        assert!(snapshot.is_none());
     }
 }

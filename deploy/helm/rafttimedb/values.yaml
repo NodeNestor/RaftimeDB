@@ -34,3 +34,26 @@ rafttimedb:
 service:
   type: LoadBalancer
   port: 3001
+
+# TLS encryption for inter-node Raft RPCs (optional)
+tls:
+  enabled: false
+  # Paths inside the container (mount certs via a Secret volume)
+  certPath: /etc/rafttimedb/certs/node.crt
+  keyPath: /etc/rafttimedb/certs/node.key
+  caPath: /etc/rafttimedb/certs/ca.crt
+  # Name of the Kubernetes Secret containing the TLS certificates
+  secretName: rafttimedb-tls
+
+# Prometheus metrics
+metrics:
+  enabled: true
+  port: 4001
+  path: /metrics
+
+# Health checks
+healthCheck:
+  enabled: true
+  path: /cluster/health
+  livenessInitialDelay: 30
+  readinessInitialDelay: 10

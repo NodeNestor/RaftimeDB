@@ -193,6 +193,17 @@ ExecStart=/opt/rafttimedb/bin/rafttimedb \
   --stdb-url ${RTDB_STDB_URL} \
   --peers ${RTDB_PEERS} \
   --data-dir ${RTDB_DATA_DIR}
+# Uncomment for TLS (requires cert/key in /etc/rafttimedb/certs/):
+# ExecStart=/opt/rafttimedb/bin/rafttimedb \
+#   --node-id ${RTDB_NODE_ID} \
+#   --listen-addr ${RTDB_LISTEN_ADDR} \
+#   --raft-addr ${RTDB_RAFT_ADDR} \
+#   --stdb-url ${RTDB_STDB_URL} \
+#   --peers ${RTDB_PEERS} \
+#   --data-dir ${RTDB_DATA_DIR} \
+#   --tls-cert ${RTDB_TLS_CERT} \
+#   --tls-key ${RTDB_TLS_KEY} \
+#   --tls-ca-cert ${RTDB_TLS_CA_CERT}
 Restart=always
 RestartSec=3
 LimitNOFILE=65536
@@ -233,6 +244,11 @@ RTDB_STDB_URL=ws://127.0.0.1:3000
 RTDB_PEERS=2=server-b:4001,3=server-c:4001
 RTDB_DATA_DIR=/var/lib/rafttimedb
 RUST_LOG=rafttimedb=info,openraft=warn
+
+# TLS (optional — uncomment and set paths to enable encrypted inter-node communication)
+# RTDB_TLS_CERT=/etc/rafttimedb/certs/node.crt
+# RTDB_TLS_KEY=/etc/rafttimedb/certs/node.key
+# RTDB_TLS_CA_CERT=/etc/rafttimedb/certs/ca.crt
 ```
 
 **server-b** (`/etc/rafttimedb/config.env`):
@@ -244,6 +260,11 @@ RTDB_STDB_URL=ws://127.0.0.1:3000
 RTDB_PEERS=1=server-a:4001,3=server-c:4001
 RTDB_DATA_DIR=/var/lib/rafttimedb
 RUST_LOG=rafttimedb=info,openraft=warn
+
+# TLS (optional)
+# RTDB_TLS_CERT=/etc/rafttimedb/certs/node.crt
+# RTDB_TLS_KEY=/etc/rafttimedb/certs/node.key
+# RTDB_TLS_CA_CERT=/etc/rafttimedb/certs/ca.crt
 ```
 
 **server-c** (`/etc/rafttimedb/config.env`):
@@ -255,6 +276,11 @@ RTDB_STDB_URL=ws://127.0.0.1:3000
 RTDB_PEERS=1=server-a:4001,2=server-b:4001
 RTDB_DATA_DIR=/var/lib/rafttimedb
 RUST_LOG=rafttimedb=info,openraft=warn
+
+# TLS (optional)
+# RTDB_TLS_CERT=/etc/rafttimedb/certs/node.crt
+# RTDB_TLS_KEY=/etc/rafttimedb/certs/node.key
+# RTDB_TLS_CA_CERT=/etc/rafttimedb/certs/ca.crt
 ```
 
 ### Generating config.env programmatically
@@ -527,10 +553,10 @@ frontend ws_front
 
 backend ws_back
     balance roundrobin
-    option httpchk GET /cluster/status
+    option httpchk GET /cluster/health
     http-check expect status 200
 
-    # Health check on Raft API port (4001)
+    # Health check on Raft API port (4001) — /cluster/health returns 200 if leader known, 503 otherwise
     server node1 server-a:3001 check port 4001 inter 5s fall 3 rise 2
     server node2 server-b:3001 check port 4001 inter 5s fall 3 rise 2
     server node3 server-c:3001 check port 4001 inter 5s fall 3 rise 2
@@ -543,7 +569,7 @@ HAProxy checks health via the Raft management API (`GET /cluster/status` on port
 **AWS:**
 - Create a Network Load Balancer (NLB) or Application Load Balancer (ALB)
 - Target group: all servers on port 3001
-- Health check: HTTP GET on port 4001, path `/cluster/status`, expect 200
+- Health check: HTTP GET on port 4001, path `/cluster/health`, expect 200
 - For WebSocket, ALB is preferred (handles upgrade headers automatically)
 - Enable stickiness if your app needs it (not required for RaftTimeDB correctness)
 
@@ -573,6 +599,41 @@ done
 You should see different node IDs, confirming round-robin distribution.
 
 ## Step 11: Monitoring
+
+### Prometheus metrics
+
+Each node exposes Prometheus metrics at `GET http://<node>:4001/metrics`. Available metrics:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `rafttimedb_raft_term` | Gauge | Current Raft term |
+| `rafttimedb_raft_is_leader` | Gauge | 1 if this node is leader, 0 otherwise |
+| `rafttimedb_connections_active` | Gauge | Active WebSocket client connections |
+| `rafttimedb_writes_total` | Counter | Total writes proposed through Raft |
+| `rafttimedb_reads_total` | Counter | Total reads forwarded directly |
+| `rafttimedb_write_latency_seconds` | Histogram | Write latency (Raft consensus + forward) |
+| `rafttimedb_entries_applied_total` | Counter | Raft log entries applied to state machine |
+
+Add to your `prometheus.yml`:
+```yaml
+scrape_configs:
+  - job_name: rafttimedb
+    static_configs:
+      - targets:
+          - server-a:4001
+          - server-b:4001
+          - server-c:4001
+    metrics_path: /metrics
+    scrape_interval: 10s
+```
+
+### Health check endpoints
+
+| Endpoint | Returns | Use for |
+|----------|---------|---------|
+| `GET /cluster/health` | 200 if leader known, 503 otherwise | Load balancer health checks |
+| `GET /cluster/leader` | `{"leader_id", "leader_addr", "this_node_is_leader"}` | Client reconnection / routing |
+| `GET /cluster/status` | Full node status (state, term, membership) | Debugging / dashboards |
 
 ### systemd journal (primary log source)
 

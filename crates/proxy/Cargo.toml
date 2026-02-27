@@ -33,5 +33,18 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 axum.workspace = true
 redb = "3.1.0"
 
+# TLS for inter-node and client communication
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-pemfile = "2"
+
+# Low-level HTTP serving (for TLS mode)
+hyper = { version = "1", features = ["server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1"] }
+tower = { version = "0.5", features = ["util"] }
+
+# Prometheus metrics
+prometheus = "0.13"
+
 [dev-dependencies]
 tempfile = "3.26.0"

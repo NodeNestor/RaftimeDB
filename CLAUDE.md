@@ -206,6 +206,9 @@ RaftTimeDB is **distributed and fault-tolerant**, not "decentralized" in the blo
 | `--stdb-url` | `RTDB_STDB_URL` | `ws://127.0.0.1:3000` | Local SpacetimeDB WebSocket URL |
 | `--peers` | `RTDB_PEERS` | required | Comma-separated: `"2=host:4001,3=host:4001"` |
 | `--data-dir` | `RTDB_DATA_DIR` | `./data` | Persistent data directory |
+| `--tls-cert` | `RTDB_TLS_CERT` | none | Path to TLS certificate (PEM) |
+| `--tls-key` | `RTDB_TLS_KEY` | none | Path to TLS private key (PEM) |
+| `--tls-ca-cert` | `RTDB_TLS_CA_CERT` | none | Path to CA cert for peer verification (PEM) |
 
 ### CLI Commands
 
@@ -225,6 +228,9 @@ rtdb remove-node --node-id 2 --cluster http://leader:4001               # Remove
 | `/cluster/add-node` | POST | Add node (learner → voter) |
 | `/cluster/remove-node` | POST | Remove node from cluster |
 | `/cluster/write` | POST | Internal: leader receives forwarded writes |
+| `/cluster/leader` | GET | Current leader ID and address |
+| `/cluster/health` | GET | Health check (200 if leader known, 503 otherwise) |
+| `/metrics` | GET | Prometheus metrics (text format) |
 | `/raft/append` | POST | Internal: Raft AppendEntries RPC |
 | `/raft/vote` | POST | Internal: Raft RequestVote RPC |
 | `/raft/snapshot` | POST | Internal: Raft InstallSnapshot RPC |
@@ -234,9 +240,10 @@ rtdb remove-node --node-id 2 --cluster http://leader:4001               # Remove
 ```
 crates/
   proxy/src/
-    main.rs              ← Entry point: starts HTTP API + WebSocket proxy + forwarder
-    api.rs               ← axum HTTP server (Raft RPCs + cluster management)
-    config.rs            ← NodeConfig struct
+    main.rs              ← Entry point: starts HTTP API + WebSocket proxy + forwarder + TLS
+    api.rs               ← axum HTTP server (Raft RPCs + cluster management + metrics)
+    config.rs            ← NodeConfig struct (including TLS config)
+    metrics.rs           ← Prometheus metric definitions and encoder
     raft/
       mod.rs             ← RaftNode: init, propose_write (with leader forwarding), parse_peers
       types.rs           ← ReducerCallRequest/Response, TypeConfig
@@ -339,15 +346,60 @@ server {
 
 Raft log is stored on disk at `{RTDB_DATA_DIR}/raft-log.redb` using redb (pure Rust, ACID). Nodes survive restarts and rejoin the cluster automatically.
 
+### TLS Encryption
+
+Enable TLS for inter-node and client communication:
+
+```bash
+rafttimedb --node-id 1 \
+  --tls-cert /path/to/cert.pem \
+  --tls-key /path/to/key.pem \
+  --tls-ca-cert /path/to/ca.pem \  # optional, for verifying peer nodes
+  ...
+```
+
+When TLS is enabled:
+- Raft inter-node RPCs use HTTPS
+- Management API serves over HTTPS
+- Leader forwarding uses HTTPS
+
 ### Monitoring
 
 - `rtdb status --addr http://{node}:4001` — cluster health
+- `GET /metrics` — Prometheus metrics (text format)
+- `GET /cluster/health` — returns 200 if leader known, 503 otherwise
+- `GET /cluster/leader` — current leader ID and address
 - `journalctl -u rafttimedb -f` — live logs (with systemd)
 - Watch for: frequent leader changes, high term numbers, nodes stuck as Learner
+
+Prometheus metrics exposed:
+- `rafttimedb_raft_term` — current Raft term
+- `rafttimedb_raft_is_leader` — 1 if this node is leader, 0 otherwise
+- `rafttimedb_connections_active` — active WebSocket client connections
+- `rafttimedb_writes_total` — total writes proposed through Raft
+- `rafttimedb_reads_total` — total reads forwarded directly
+- `rafttimedb_write_latency_seconds` — write latency histogram
+- `rafttimedb_entries_applied_total` — Raft entries applied to state machine
+
+### Client Reconnection
+
+When a node shuts down gracefully, it sends a WebSocket close frame with a leader hint:
+```
+Close code: 1001 (Going Away)
+Reason: "leader=<id>:<addr>"
+```
+
+Clients can parse this to reconnect directly to the current leader. The `/cluster/leader` endpoint also provides the leader address for HTTP-based discovery.
+
+### Graceful Shutdown
+
+The proxy handles Ctrl+C (all platforms) and SIGTERM (Unix). On shutdown:
+1. All tasks receive a shutdown signal via watch channel
+2. Active WebSocket connections receive close frames with leader hints
+3. HTTP server stops accepting new connections
+4. 5-second drain period allows in-flight requests to complete
 
 ## Known Limitations / Next Steps
 
 - **No module deployment replication** — you must `spacetime publish` to each instance separately. A future version could proxy the SpacetimeDB HTTP API too.
-- **No client reconnection** — if a node dies, connected clients get disconnected. They need to reconnect to another node. A load balancer in front solves this.
-- **No Prometheus metrics** — monitoring is via `rtdb status` only.
 - **Single shard** — all writes go through one Raft group. Phase 3 will add multi-shard (one Raft group per module).

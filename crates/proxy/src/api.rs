@@ -13,12 +13,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::metrics;
 use crate::raft::types::{ReducerCallRequest, TypeConfig};
 
 /// Shared application state for the HTTP management API.
 pub struct AppState {
     pub raft: Raft<TypeConfig>,
     pub node_id: u64,
+    /// Peer node addresses for leader lookup.
+    pub peers: BTreeMap<u64, BasicNode>,
+    /// URL scheme for inter-node communication.
+    pub http_scheme: String,
 }
 
 /// Build the axum router with all Raft RPC and cluster management endpoints.
@@ -35,6 +40,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/cluster/remove-node", post(cluster_remove_node))
         // Write forwarding endpoint (leader receives forwarded writes from followers)
         .route("/cluster/write", post(cluster_write))
+        // Discovery / monitoring endpoints
+        .route("/cluster/leader", get(cluster_leader))
+        .route("/cluster/health", get(cluster_health))
+        .route("/metrics", get(prometheus_metrics))
         .with_state(state)
 }
 
@@ -193,4 +202,60 @@ async fn cluster_write(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok((StatusCode::OK, "Write committed".to_string()))
+}
+
+// ============================================================================
+// Discovery & Monitoring Endpoints
+// ============================================================================
+
+#[derive(Serialize)]
+struct LeaderInfo {
+    leader_id: Option<u64>,
+    leader_addr: Option<String>,
+    this_node_is_leader: bool,
+}
+
+/// Return the current Raft leader's address.
+/// Clients use this for reconnection after failover.
+async fn cluster_leader(State(state): State<Arc<AppState>>) -> Json<LeaderInfo> {
+    let metrics = state.raft.metrics().borrow().clone();
+    let leader_id = metrics.current_leader;
+    let this_node_is_leader = leader_id == Some(state.node_id);
+
+    let leader_addr = leader_id.and_then(|id| {
+        if id == state.node_id {
+            None // Return None for self — client is already connected here
+        } else {
+            state.peers.get(&id).map(|n| n.addr.clone())
+        }
+    });
+
+    Json(LeaderInfo {
+        leader_id,
+        leader_addr,
+        this_node_is_leader,
+    })
+}
+
+/// Health check endpoint. Returns 200 if the node is healthy, 503 if not.
+async fn cluster_health(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let metrics = state.raft.metrics().borrow().clone();
+
+    // A node is healthy if it knows who the leader is
+    if metrics.current_leader.is_some() {
+        Ok((StatusCode::OK, "healthy".to_string()))
+    } else {
+        Err((StatusCode::SERVICE_UNAVAILABLE, "no leader elected".to_string()))
+    }
+}
+
+/// Prometheus metrics endpoint.
+async fn prometheus_metrics() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        metrics::encode_metrics(),
+    )
 }

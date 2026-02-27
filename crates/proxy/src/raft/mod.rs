@@ -7,6 +7,7 @@ pub mod types;
 pub use types::*;
 
 use crate::config::NodeConfig;
+use crate::metrics;
 use anyhow::Result;
 use openraft::{BasicNode, Config, Raft};
 use state_machine::StateMachineStore;
@@ -52,7 +53,18 @@ impl RaftNode {
         let raft_config = Arc::new(raft_config.validate()?);
 
         let state_machine = StateMachineStore::new();
-        let network = network::NetworkFactory::new();
+
+        // Load CA cert for peer verification if configured
+        let ca_cert_pem = if let Some(ref ca_path) = config.tls_ca_cert {
+            Some(std::fs::read(ca_path)?)
+        } else {
+            None
+        };
+
+        let network = network::NetworkFactory::new(
+            config.tls_enabled(),
+            ca_cert_pem.as_deref(),
+        );
 
         // Use persistent log store when data_dir is configured.
         // The persistent store survives restarts — critical for production.
@@ -74,6 +86,7 @@ impl RaftNode {
         info!(
             node_id = config.node_id,
             peer_count = peers.len(),
+            tls = config.tls_enabled(),
             "Raft node initialized"
         );
 
@@ -88,12 +101,15 @@ impl RaftNode {
     /// Propose a write (reducer call) through Raft consensus.
     /// If this node is not the leader, forwards the request to the leader via HTTP.
     pub async fn propose_write(&self, data: Vec<u8>) -> Result<()> {
+        let timer = metrics::WRITE_LATENCY.start_timer();
+        metrics::WRITES_TOTAL.inc();
+
         let request = ReducerCallRequest {
             raw_message: data.clone(),
             origin_node_id: self.config.node_id,
         };
 
-        match self.raft.client_write(request).await {
+        let result = match self.raft.client_write(request).await {
             Ok(_) => Ok(()),
             Err(err) => {
                 // Check for ForwardToLeader — this node isn't the leader
@@ -102,7 +118,8 @@ impl RaftNode {
                 ) = &err
                 {
                     if let Some(leader_node) = &forward.leader_node {
-                        let url = format!("http://{}/cluster/write", leader_node.addr);
+                        let scheme = self.config.http_scheme();
+                        let url = format!("{}://{}/cluster/write", scheme, leader_node.addr);
                         info!(leader_addr = %leader_node.addr, "Forwarding write to leader");
 
                         // Preserve origin_node_id so the forwarder on this node
@@ -131,12 +148,38 @@ impl RaftNode {
                 }
                 Err(err.into())
             }
-        }
+        };
+
+        timer.observe_duration();
+        result
     }
 
     /// Check if this node is the current Raft leader.
     pub async fn is_leader(&self) -> bool {
         self.raft.ensure_linearizable().await.is_ok()
+    }
+
+    /// Get the current leader's node ID and address.
+    pub fn current_leader(&self) -> Option<(u64, String)> {
+        let metrics = self.raft.metrics().borrow().clone();
+        let leader_id = metrics.current_leader?;
+
+        // Check if we are the leader
+        if leader_id == self.config.node_id {
+            return Some((leader_id, self.config.raft_addr.clone()));
+        }
+
+        // Look up leader address in peers
+        let addr = self.peers.get(&leader_id)?.addr.clone();
+        Some((leader_id, addr))
+    }
+
+    /// Update Prometheus metrics from current Raft state.
+    pub fn update_metrics(&self) {
+        let raft_metrics = self.raft.metrics().borrow().clone();
+        metrics::RAFT_TERM.set(raft_metrics.vote.leader_id().term as i64);
+        let is_leader = raft_metrics.current_leader == Some(self.config.node_id);
+        metrics::RAFT_IS_LEADER.set(if is_leader { 1 } else { 0 });
     }
 }
 

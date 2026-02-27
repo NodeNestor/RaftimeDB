@@ -23,14 +23,16 @@ chmod +x tests/e2e/docker_cluster_test.sh
 1. All 3 nodes start and are reachable
 2. WebSocket ports are open on all nodes
 3. SpacetimeDB instances are healthy
-4. Killing a node doesn't kill the cluster
-5. Dead node can rejoin
+4. Cluster bootstraps and elects a leader
+5. Write forwarding through Raft consensus
+6. Killing a node doesn't kill the cluster (re-election)
+7. Dead node can rejoin and catch up
 
-### What It Will Test (once Raft transport is implemented)
+### Additional Test Coverage (manual / future automation)
 
-1. Publish a SpacetimeDB module through one node
-2. Call a reducer through node 1
-3. Query state through node 2 (verify replication)
-4. Kill the leader node
-5. Verify writes still work through a new leader
-6. Restart the dead node, verify it catches up
+- Prometheus metrics endpoint (`GET /metrics` on port 4001)
+- Health check endpoint (`GET /cluster/health`)
+- Leader discovery endpoint (`GET /cluster/leader`)
+- Client reconnection hints in WebSocket close frames on shutdown
+- TLS inter-node communication (requires cert setup)
+- Graceful shutdown with connection draining

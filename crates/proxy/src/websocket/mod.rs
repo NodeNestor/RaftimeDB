@@ -25,14 +25,22 @@ pub struct Proxy {
     /// Broadcasts the database path (e.g. "/database/subscribe/mydb") to the
     /// forwarder task so it can connect to SpacetimeDB with the correct URL.
     db_path_tx: watch::Sender<String>,
+    /// Receives shutdown signal to stop accepting new connections.
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl Proxy {
-    pub fn new(config: NodeConfig, raft: RaftNode, db_path_tx: watch::Sender<String>) -> Self {
+    pub fn new(
+        config: NodeConfig,
+        raft: RaftNode,
+        db_path_tx: watch::Sender<String>,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Self {
         Self {
             config,
             raft: Arc::new(raft),
             db_path_tx,
+            shutdown_rx,
         }
     }
 
@@ -40,18 +48,31 @@ impl Proxy {
         let listener = TcpListener::bind(&self.config.listen_addr).await?;
         info!(addr = %self.config.listen_addr, "WebSocket proxy listening");
 
-        loop {
-            let (stream, addr) = listener.accept().await?;
-            let raft = self.raft.clone();
-            let stdb_url = self.config.stdb_url.clone();
-            let db_path_tx = self.db_path_tx.clone();
+        let mut shutdown = self.shutdown_rx.clone();
 
-            tokio::spawn(async move {
-                match handler::handle_client(stream, raft, &stdb_url, db_path_tx).await {
-                    Ok(()) => info!(%addr, "Client disconnected"),
-                    Err(e) => error!(%addr, error = %e, "Client connection error"),
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    let (stream, addr) = result?;
+                    let raft = self.raft.clone();
+                    let stdb_url = self.config.stdb_url.clone();
+                    let db_path_tx = self.db_path_tx.clone();
+                    let conn_shutdown = self.shutdown_rx.clone();
+
+                    tokio::spawn(async move {
+                        match handler::handle_client(stream, raft, &stdb_url, db_path_tx, conn_shutdown).await {
+                            Ok(()) => info!(%addr, "Client disconnected"),
+                            Err(e) => error!(%addr, error = %e, "Client connection error"),
+                        }
+                    });
                 }
-            });
+                _ = shutdown.changed() => {
+                    info!("Shutdown signal received, stopping WebSocket proxy");
+                    break;
+                }
+            }
         }
+
+        Ok(())
     }
 }

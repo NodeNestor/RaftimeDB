@@ -53,22 +53,24 @@ deploy/
 
 Check the [GitHub Issues](https://github.com/NodeNestor/RaftimeDB/issues) for current priorities. The big areas:
 
-### Phase 1: Make It Work
-- ~~Cluster bootstrap (initial leader election)~~ Done
-- ~~Persistent log store (redb)~~ Done
-- TCP transport for Raft inter-node communication
-- Snapshot support for node catch-up
-
-### Phase 2: Make It Solid
-- Prometheus metrics
-- Client failover (redirect to new leader)
-- Graceful shutdown
-- Integration tests
+### Completed
+- ~~Cluster bootstrap (initial leader election)~~
+- ~~Persistent log store (redb)~~
+- ~~TLS encryption for inter-node communication~~
+- ~~Prometheus metrics~~
+- ~~Client reconnection hints on failover~~
+- ~~Graceful shutdown and connection draining~~
+- ~~Snapshot support for node catch-up~~
+- ~~Health check and leader discovery endpoints~~
 
 ### Phase 3: Make It Scale
 - Multi-Raft (one Raft group per SpacetimeDB module)
 - Shard splitting and rebalancing
-- K8s operator
+
+### Phase 4: Kubernetes Operator
+- `SpacetimeCluster` Custom Resource Definition
+- Auto-scaling based on connection count / memory
+- Rolling upgrades with zero downtime
 
 ## Pull Request Process
 
