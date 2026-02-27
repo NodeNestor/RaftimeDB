@@ -41,7 +41,7 @@ crates/
 │   └── src/
 │       ├── raft/       # Raft consensus (openraft)
 │       ├── websocket/  # WebSocket proxy (client ↔ SpacetimeDB)
-│       └── router/     # Shard routing (multi-raft, future)
+│       └── router/     # Shard routing (multi-raft)
 ├── cli/            # CLI tool (rtdb)
 deploy/
 ├── docker/         # Docker Compose for local dev
@@ -63,11 +63,16 @@ Check the [GitHub Issues](https://github.com/NodeNestor/RaftimeDB/issues) for cu
 - ~~Snapshot support for node catch-up~~
 - ~~Health check and leader discovery endpoints~~
 
-### Phase 3: Make It Scale
-- Multi-Raft (one Raft group per SpacetimeDB module)
-- Shard splitting and rebalancing
+### Completed (Phase 3)
+- ~~Multi-Raft (one Raft group per SpacetimeDB module)~~
+- ~~Shard management API and CLI~~
+- ~~Module-based shard routing~~
 
-### Phase 4: Kubernetes Operator
+### Phase 4: Further Scaling
+- Shard splitting and rebalancing
+- Per-shard membership subsets (not all nodes in all shards)
+
+### Phase 5: Kubernetes Operator
 - `SpacetimeCluster` Custom Resource Definition
 - Auto-scaling based on connection count / memory
 - Rolling upgrades with zero downtime

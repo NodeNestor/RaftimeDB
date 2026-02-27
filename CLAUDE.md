@@ -177,12 +177,13 @@ See `/scale` Claude skill for step-by-step automation.
 
 1. Client sends `CallReducer` to any node (say node-2, a follower)
 2. RaftTimeDB reads tag byte `0x03` → classifies as Write
-3. Proposes write through Raft consensus
-4. If this node is a follower, forwards to the leader internally
-5. Leader commits the write, replicates to all nodes
-6. **Originating node**: handler forwards the write to its local SpacetimeDB (client gets the response)
-7. **Other nodes**: forwarder task sends the committed write to their local SpacetimeDB
-8. All 3 SpacetimeDB instances now have identical state
+3. Extracts module name from WebSocket path → routes to correct shard
+4. Proposes write through that shard's Raft consensus
+5. If this node is a follower for that shard, forwards to the shard's leader internally
+6. Leader commits the write, replicates to all nodes
+7. **Originating node**: handler forwards the write to its local SpacetimeDB (client gets the response)
+8. **Other nodes**: per-shard forwarder task sends the committed write to their local SpacetimeDB
+9. All 3 SpacetimeDB instances now have identical state
 
 ### How Reads Work
 
@@ -217,48 +218,62 @@ rtdb init --nodes 1=host:4001 2=host:4001 3=host:4001   # Bootstrap cluster (onc
 rtdb status --addr http://host:4001                       # Show node status
 rtdb add-node --node-id 4 --addr host:4001 --cluster http://leader:4001  # Add node
 rtdb remove-node --node-id 2 --cluster http://leader:4001               # Remove node
+rtdb create-shard --shard-id 1 --cluster http://leader:4001             # Create shard
+rtdb add-route --module game --shard-id 1 --cluster http://leader:4001  # Route module
+rtdb remove-route --module game --cluster http://leader:4001            # Unroute module
+rtdb list-shards --addr http://node:4001                                # List shards
+rtdb shard-status --shard-id 1 --addr http://node:4001                  # Shard status
 ```
 
 ### Management API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/cluster/status` | GET | Node status (state, leader, term) |
-| `/cluster/init` | POST | Bootstrap cluster with member map |
-| `/cluster/add-node` | POST | Add node (learner → voter) |
-| `/cluster/remove-node` | POST | Remove node from cluster |
-| `/cluster/write` | POST | Internal: leader receives forwarded writes |
+| `/cluster/status` | GET | Node status (state, leader, term, active shards) |
+| `/cluster/init` | POST | Bootstrap cluster with member map (shard 0 only) |
+| `/cluster/add-node` | POST | Add node (learner → voter, all shards) |
+| `/cluster/remove-node` | POST | Remove node from cluster (all shards) |
+| `/cluster/write` | POST | Internal: leader receives forwarded writes (shard 0) |
+| `/cluster/{shard_id}/write` | POST | Internal: shard-specific write forwarding |
 | `/cluster/leader` | GET | Current leader ID and address |
 | `/cluster/health` | GET | Health check (200 if leader known, 503 otherwise) |
+| `/cluster/shards` | GET | List all shards and routes |
+| `/cluster/shards/create` | POST | Create a new shard (via Raft consensus) |
+| `/cluster/shards/route` | POST | Add module → shard route (via Raft) |
+| `/cluster/shards/route` | DELETE | Remove module route (via Raft) |
+| `/cluster/shards/{id}/status` | GET | Shard-specific Raft status |
 | `/metrics` | GET | Prometheus metrics (text format) |
-| `/raft/append` | POST | Internal: Raft AppendEntries RPC |
-| `/raft/vote` | POST | Internal: Raft RequestVote RPC |
-| `/raft/snapshot` | POST | Internal: Raft InstallSnapshot RPC |
+| `/raft/{shard_id}/append` | POST | Internal: shard-specific Raft AppendEntries |
+| `/raft/{shard_id}/vote` | POST | Internal: shard-specific Raft RequestVote |
+| `/raft/{shard_id}/snapshot` | POST | Internal: shard-specific Raft InstallSnapshot |
+| `/raft/append` | POST | Legacy alias: Raft AppendEntries (shard 0) |
+| `/raft/vote` | POST | Legacy alias: Raft RequestVote (shard 0) |
+| `/raft/snapshot` | POST | Legacy alias: Raft InstallSnapshot (shard 0) |
 
 ## Project Structure
 
 ```
 crates/
   proxy/src/
-    main.rs              ← Entry point: starts HTTP API + WebSocket proxy + forwarder + TLS
-    api.rs               ← axum HTTP server (Raft RPCs + cluster management + metrics)
+    main.rs              ← Entry point: starts HTTP API + WebSocket proxy + TLS
+    api.rs               ← axum HTTP server (Raft RPCs + cluster + shard management + metrics)
     config.rs            ← NodeConfig struct (including TLS config)
     metrics.rs           ← Prometheus metric definitions and encoder
     raft/
-      mod.rs             ← RaftNode: init, propose_write (with leader forwarding), parse_peers
+      mod.rs             ← RaftPool: multi-shard Raft pool, propose_write, leader forwarding
       types.rs           ← ReducerCallRequest/Response, TypeConfig
-      network.rs         ← HTTP transport (reqwest → POST /raft/*)
-      state_machine.rs   ← Apply committed entries, snapshots, forwarder channel
+      network.rs         ← HTTP transport (reqwest → POST /raft/{shard_id}/*)
+      state_machine.rs   ← Apply committed entries, snapshots, shard config (0xFF), forwarder
       log_store.rs       ← In-memory Raft log (kept for reference/testing)
-      persistent_log_store.rs ← Persistent Raft log using redb (production)
+      persistent_log_store.rs ← Per-shard persistent Raft log using redb (production)
     websocket/
-      mod.rs             ← Proxy: accepts client connections
-      handler.rs         ← Message classification (1-byte tag), client↔SpacetimeDB routing
+      mod.rs             ← Proxy: accepts client connections, holds Arc<RaftPool>
+      handler.rs         ← Message classification, module extraction, shard-aware routing
       upstream.rs        ← Placeholder for connection management
     router/
-      mod.rs             ← ShardRouter (Phase 2: multi-shard, currently single-shard)
+      mod.rs             ← ShardRouter, ShardConfigCommand, extract_module_name, encode/decode
   cli/src/
-    main.rs              ← rtdb CLI: status, init, add-node, remove-node
+    main.rs              ← rtdb CLI: status, init, add/remove-node, shard management
 deploy/
   docker/
     Dockerfile           ← Multi-stage Rust build
@@ -278,14 +293,18 @@ tests/
 - **One-byte classification** — reads tag byte 0 of each WebSocket message to route reads vs writes
 - **Opaque blob replication** — entire WebSocket message replicated, no BSATN parsing needed
 - **origin_node_id dedup** — each Raft entry records which node proposed it; the forwarder skips entries from the local node (handler already forwarded them)
-- **Metadata-only snapshots** — SpacetimeDB is the source of truth; snapshots store last_applied + membership
-- **Persistent log store** — redb (pure Rust) stores Raft log + vote on disk; survives restarts
+- **Metadata-only snapshots** — SpacetimeDB is the source of truth; snapshots store last_applied + membership + shard config
+- **Persistent log store** — redb (pure Rust) stores Raft log + vote on disk; survives restarts. Per-shard: `{data_dir}/shard-{id}/raft-log.redb`
+- **Multi-Raft (multi-shard)** — one Raft group per SpacetimeDB module. Different modules get different leaders, enabling parallel write throughput. Shard 0 is the default; all unrouted modules go there
+- **Shard config via Raft** — shard mappings (module → shard) are consensus-replicated through shard 0's Raft log (0xFF prefix tag). No external config store needed
+- **All nodes participate in all shards** — simpler model. Per-shard membership subsets is a future optimization
+- **Path-based Raft RPC routing** — `/raft/{shard_id}/append` with legacy `/raft/append` aliasing to shard 0
 
 ## Development
 
 ```bash
 cargo build                    # Build both crates
-cargo test                     # Run all 47 tests
+cargo test                     # Run all 65 tests
 cargo build --release          # Release build
 cargo install --path crates/cli   # Install rtdb CLI
 RUST_LOG=rafttimedb=debug cargo run --bin rafttimedb -- --node-id 1 ...  # Debug logging
@@ -344,7 +363,7 @@ server {
 
 ### Persistence
 
-Raft log is stored on disk at `{RTDB_DATA_DIR}/raft-log.redb` using redb (pure Rust, ACID). Nodes survive restarts and rejoin the cluster automatically.
+Raft log is stored on disk at `{RTDB_DATA_DIR}/shard-{id}/raft-log.redb` using redb (pure Rust, ACID). Each shard gets its own database file. Nodes survive restarts and rejoin the cluster automatically. Legacy `raft-log.redb` at the data dir root is auto-migrated to `shard-0/` on first startup.
 
 ### TLS Encryption
 
@@ -399,7 +418,46 @@ The proxy handles Ctrl+C (all platforms) and SIGTERM (Unix). On shutdown:
 3. HTTP server stops accepting new connections
 4. 5-second drain period allows in-flight requests to complete
 
+## Multi-Shard (Multi-Raft)
+
+RaftTimeDB supports multiple Raft groups — one per SpacetimeDB module. Different modules get different leaders, so writes for different modules process in parallel.
+
+**Backwards compatible**: existing single-shard clusters keep working with zero config changes. Shard 0 is the default — all unrouted modules go there.
+
+### Creating and Using Shards
+
+```bash
+# Create a new shard
+rtdb create-shard --shard-id 1 --cluster http://leader:4001
+
+# Route a module to the new shard
+rtdb add-route --module game --shard-id 1 --cluster http://leader:4001
+
+# Now all "game" module writes go through shard 1's Raft group
+# Other modules still use shard 0 (default)
+
+# Check shard status
+rtdb list-shards --addr http://node:4001
+rtdb shard-status --shard-id 1 --addr http://node:4001
+
+# Remove a route (module goes back to shard 0)
+rtdb remove-route --module game --cluster http://leader:4001
+```
+
+### How It Works
+
+1. Shard config commands are replicated via shard 0's Raft log (consensus-safe)
+2. All nodes see the same config changes in the same order
+3. New shards inherit membership from shard 0 (all nodes participate in all shards)
+4. Each shard has its own Raft leader, log store, forwarder, and SpacetimeDB connection
+5. The WebSocket handler extracts the module name from the path and routes to the correct shard
+6. Shard config is preserved in snapshots — new nodes receive the full shard topology
+
+### Shard Config Encoding
+
+Shard config commands use tag byte `0xFF` (SpacetimeDB tags are 0-4, so no conflict). Format: `[0xFF][JSON payload]`. This is replicated as a normal Raft entry through shard 0.
+
 ## Known Limitations / Next Steps
 
 - **No module deployment replication** — you must `spacetime publish` to each instance separately. A future version could proxy the SpacetimeDB HTTP API too.
-- **Single shard** — all writes go through one Raft group. Phase 3 will add multi-shard (one Raft group per module).
+- **All nodes in all shards** — every node participates in every Raft group. A future optimization could allow per-shard membership subsets for very large clusters.

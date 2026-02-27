@@ -8,10 +8,10 @@ use tracing::debug;
 
 type C = TypeConfig;
 
-/// redb table: log index (u64) → serialized Entry (JSON bytes)
+/// redb table: log index (u64) -> serialized Entry (JSON bytes)
 const LOG_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("raft_log");
 
-/// redb table: meta key (string) → serialized value (JSON bytes)
+/// redb table: meta key (string) -> serialized value (JSON bytes)
 const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_meta");
 
 const META_VOTE: &str = "vote";
@@ -19,16 +19,49 @@ const META_LAST_PURGED: &str = "last_purged";
 
 /// Persistent log store backed by redb (pure Rust, ACID, zero C++ deps).
 /// Survives node restarts — critical for production Raft clusters.
+///
+/// Each shard gets its own database file at `{data_dir}/shard-{shard_id}/raft-log.redb`.
 #[derive(Clone)]
 pub struct PersistentLogStore {
     db: Arc<Database>,
 }
 
 impl PersistentLogStore {
-    /// Open or create a persistent log store at the given directory.
-    /// Creates `{data_dir}/raft-log.redb`.
-    pub fn new(data_dir: &Path) -> Result<Self, StorageError<u64>> {
-        std::fs::create_dir_all(data_dir).map_err(|e| {
+    /// Open or create a persistent log store for a specific shard.
+    /// Creates `{data_dir}/shard-{shard_id}/raft-log.redb`.
+    ///
+    /// For shard 0, auto-migrates legacy `{data_dir}/raft-log.redb` if present.
+    pub fn new(data_dir: &Path, shard_id: u64) -> Result<Self, StorageError<u64>> {
+        let shard_dir = data_dir.join(format!("shard-{}", shard_id));
+
+        // Migration: if shard 0 and old raft-log.redb exists at data_dir root, move it
+        if shard_id == 0 {
+            let old_path = data_dir.join("raft-log.redb");
+            if old_path.exists() && !shard_dir.join("raft-log.redb").exists() {
+                std::fs::create_dir_all(&shard_dir).map_err(|e| {
+                    StorageError::from_io_error(
+                        openraft::ErrorSubject::Logs,
+                        openraft::ErrorVerb::Write,
+                        e,
+                    )
+                })?;
+                let new_path = shard_dir.join("raft-log.redb");
+                std::fs::rename(&old_path, &new_path).map_err(|e| {
+                    StorageError::from_io_error(
+                        openraft::ErrorSubject::Logs,
+                        openraft::ErrorVerb::Write,
+                        e,
+                    )
+                })?;
+                tracing::info!(
+                    old = %old_path.display(),
+                    new = %new_path.display(),
+                    "Migrated legacy raft-log.redb to shard-0 directory"
+                );
+            }
+        }
+
+        std::fs::create_dir_all(&shard_dir).map_err(|e| {
             StorageError::from_io_error(
                 openraft::ErrorSubject::Logs,
                 openraft::ErrorVerb::Write,
@@ -36,7 +69,7 @@ impl PersistentLogStore {
             )
         })?;
 
-        let db_path = data_dir.join("raft-log.redb");
+        let db_path = shard_dir.join("raft-log.redb");
         let db = Database::create(&db_path).map_err(|e| {
             StorageError::from_io_error(
                 openraft::ErrorSubject::Logs,
@@ -63,7 +96,7 @@ impl PersistentLogStore {
             )
         })?;
 
-        debug!(path = %db_path.display(), "Persistent log store opened");
+        debug!(path = %db_path.display(), shard_id, "Persistent log store opened");
 
         Ok(Self { db: Arc::new(db) })
     }
@@ -458,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn test_persistent_store_vote_roundtrip() {
         let dir = TempDir::new().unwrap();
-        let mut store = PersistentLogStore::new(dir.path()).unwrap();
+        let mut store = PersistentLogStore::new(dir.path(), 0).unwrap();
 
         assert!(store.read_vote().await.unwrap().is_none());
 
@@ -472,7 +505,7 @@ mod tests {
     #[tokio::test]
     async fn test_persistent_store_append_and_read() {
         let dir = TempDir::new().unwrap();
-        let mut store = PersistentLogStore::new(dir.path()).unwrap();
+        let mut store = PersistentLogStore::new(dir.path(), 0).unwrap();
 
         let entries = vec![make_entry(1, 1), make_entry(1, 2), make_entry(1, 3)];
         write_entries_directly(&store, &entries);
@@ -489,7 +522,7 @@ mod tests {
 
         // Write some data
         {
-            let mut store = PersistentLogStore::new(dir.path()).unwrap();
+            let mut store = PersistentLogStore::new(dir.path(), 0).unwrap();
             let vote = Vote::new(2, 1);
             store.save_vote(&vote).await.unwrap();
 
@@ -499,7 +532,7 @@ mod tests {
 
         // Reopen and verify data persisted
         {
-            let mut store = PersistentLogStore::new(dir.path()).unwrap();
+            let mut store = PersistentLogStore::new(dir.path(), 0).unwrap();
             let vote = store.read_vote().await.unwrap().unwrap();
             assert_eq!(vote, Vote::new(2, 1));
 
@@ -514,7 +547,7 @@ mod tests {
     #[tokio::test]
     async fn test_persistent_store_truncate() {
         let dir = TempDir::new().unwrap();
-        let mut store = PersistentLogStore::new(dir.path()).unwrap();
+        let mut store = PersistentLogStore::new(dir.path(), 0).unwrap();
 
         let entries = vec![make_entry(1, 1), make_entry(1, 2), make_entry(1, 3)];
         write_entries_directly(&store, &entries);
@@ -533,7 +566,7 @@ mod tests {
     #[tokio::test]
     async fn test_persistent_store_purge() {
         let dir = TempDir::new().unwrap();
-        let mut store = PersistentLogStore::new(dir.path()).unwrap();
+        let mut store = PersistentLogStore::new(dir.path(), 0).unwrap();
 
         let entries = vec![make_entry(1, 1), make_entry(1, 2), make_entry(1, 3)];
         write_entries_directly(&store, &entries);
@@ -550,5 +583,35 @@ mod tests {
 
         let state = store.get_log_state().await.unwrap();
         assert_eq!(state.last_purged_log_id.unwrap().index, 2);
+    }
+
+    #[tokio::test]
+    async fn test_per_shard_path() {
+        let dir = TempDir::new().unwrap();
+        let _store0 = PersistentLogStore::new(dir.path(), 0).unwrap();
+        let _store1 = PersistentLogStore::new(dir.path(), 1).unwrap();
+
+        assert!(dir.path().join("shard-0/raft-log.redb").exists());
+        assert!(dir.path().join("shard-1/raft-log.redb").exists());
+    }
+
+    #[tokio::test]
+    async fn test_legacy_migration() {
+        let dir = TempDir::new().unwrap();
+
+        // Create a legacy raft-log.redb at the root
+        {
+            let db_path = dir.path().join("raft-log.redb");
+            let _db = Database::create(&db_path).unwrap();
+        }
+
+        assert!(dir.path().join("raft-log.redb").exists());
+        assert!(!dir.path().join("shard-0/raft-log.redb").exists());
+
+        // Opening shard 0 should auto-migrate
+        let _store = PersistentLogStore::new(dir.path(), 0).unwrap();
+
+        assert!(!dir.path().join("raft-log.redb").exists());
+        assert!(dir.path().join("shard-0/raft-log.redb").exists());
     }
 }

@@ -36,3 +36,6 @@ chmod +x tests/e2e/docker_cluster_test.sh
 - Client reconnection hints in WebSocket close frames on shutdown
 - TLS inter-node communication (requires cert setup)
 - Graceful shutdown with connection draining
+- Multi-shard: create shard, add module route, verify writes go to correct shard
+- Multi-shard: per-shard status and leader election
+- Multi-shard: membership changes propagate to all shards

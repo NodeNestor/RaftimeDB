@@ -319,17 +319,18 @@ If your app matters, it should be replicated. RaftTimeDB makes that a config cha
 ## CLI Tool
 
 ```bash
-# Cluster status
-rtdb status --addr http://localhost:3001
+# Cluster management
+rtdb init --nodes 1=node1:4001 2=node2:4001 3=node3:4001   # Bootstrap cluster (once)
+rtdb status --addr http://localhost:4001                      # Show node status
+rtdb add-node --node-id 4 --addr new-node:4001               # Add a node
+rtdb remove-node --node-id 2                                  # Remove a node
 
-# Add a node to the cluster
-rtdb add-node --node-id 4 --addr new-node:4001
-
-# Remove a node
-rtdb remove-node --node-id 2
-
-# Initialize a new cluster
-rtdb init --nodes 1=node1:4001 2=node2:4001 3=node3:4001
+# Shard management (multi-raft)
+rtdb create-shard --shard-id 1 --cluster http://localhost:4001
+rtdb add-route --module my_game --shard-id 1 --cluster http://localhost:4001
+rtdb remove-route --module my_game --cluster http://localhost:4001
+rtdb list-shards --addr http://localhost:4001
+rtdb shard-status --shard-id 1 --addr http://localhost:4001
 ```
 
 ## Configuration
@@ -360,6 +361,7 @@ RaftTimeDB includes everything needed for production deployments:
 - **Graceful shutdown** — Ctrl+C / SIGTERM triggers coordinated shutdown: drain connections, send close frames, 5-second drain period
 - **Persistent Raft log** — redb (pure Rust, ACID) stores Raft log + vote on disk; nodes survive restarts
 - **Snapshot support** — fast catch-up for new or restarted nodes
+- **Multi-shard (Multi-Raft)** — each SpacetimeDB module can get its own Raft group for parallel write throughput
 
 ## Roadmap
 
@@ -382,8 +384,12 @@ RaftTimeDB includes everything needed for production deployments:
 - [x] Helm chart for K8s/K3s
 
 ### Phase 3: Horizontal Scaling (Multi-Raft)
-- [ ] Each SpacetimeDB module gets its own Raft group
-- [ ] Shard router (route clients to correct Raft group)
+- [x] Each SpacetimeDB module gets its own Raft group
+- [x] Shard router (route clients to correct Raft group by module name)
+- [x] Shard management API + CLI (create shards, add/remove routes)
+- [x] Shard config replicated via Raft consensus (no external store)
+- [x] Per-shard persistent log stores with auto-migration
+- [x] Backwards compatible — existing single-shard clusters work unchanged
 - [ ] Shard splitting when memory threshold exceeded
 - [ ] Coalesced heartbeats across Raft groups (CockroachDB pattern)
 - [ ] Batched persistence writes (TiKV pattern)

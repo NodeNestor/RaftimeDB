@@ -10,13 +10,16 @@ use openraft::BasicNode;
 type C = TypeConfig;
 
 /// Network transport for Raft inter-node communication via HTTP(S).
+/// Each shard's Raft instance gets its own NetworkFactory with its shard_id,
+/// producing URLs like `/raft/{shard_id}/append`.
 pub struct NetworkFactory {
     client: reqwest::Client,
     use_tls: bool,
+    shard_id: u64,
 }
 
 impl NetworkFactory {
-    pub fn new(use_tls: bool, ca_cert_pem: Option<&[u8]>) -> Self {
+    pub fn new(use_tls: bool, ca_cert_pem: Option<&[u8]>, shard_id: u64) -> Self {
         let mut builder = reqwest::Client::builder();
 
         if let Some(ca_pem) = ca_cert_pem {
@@ -28,13 +31,14 @@ impl NetworkFactory {
         Self {
             client: builder.build().unwrap_or_else(|_| reqwest::Client::new()),
             use_tls,
+            shard_id,
         }
     }
 }
 
 impl Default for NetworkFactory {
     fn default() -> Self {
-        Self::new(false, None)
+        Self::new(false, None, 0)
     }
 }
 
@@ -43,12 +47,14 @@ pub struct NetworkConnection {
     addr: String,
     client: reqwest::Client,
     use_tls: bool,
+    shard_id: u64,
 }
 
 impl NetworkConnection {
-    fn url(&self, path: &str) -> String {
+    /// Build a URL for a Raft RPC: `{scheme}://{addr}/raft/{shard_id}/{rpc}`
+    fn raft_url(&self, rpc: &str) -> String {
         let scheme = if self.use_tls { "https" } else { "http" };
-        format!("{}://{}{}", scheme, self.addr, path)
+        format!("{}://{}/raft/{}/{}", scheme, self.addr, self.shard_id, rpc)
     }
 }
 
@@ -61,6 +67,7 @@ impl RaftNetworkFactory<C> for NetworkFactory {
             addr: node.addr.clone(),
             client: self.client.clone(),
             use_tls: self.use_tls,
+            shard_id: self.shard_id,
         }
     }
 }
@@ -71,7 +78,7 @@ impl RaftNetwork<C> for NetworkConnection {
         rpc: AppendEntriesRequest<C>,
         _option: RPCOption,
     ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
-        let url = self.url("/raft/append");
+        let url = self.raft_url("append");
         let resp: Result<AppendEntriesResponse<u64>, RaftError<u64>> = self
             .client
             .post(&url)
@@ -91,7 +98,7 @@ impl RaftNetwork<C> for NetworkConnection {
         rpc: VoteRequest<u64>,
         _option: RPCOption,
     ) -> Result<VoteResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
-        let url = self.url("/raft/vote");
+        let url = self.raft_url("vote");
         let resp: Result<VoteResponse<u64>, RaftError<u64>> = self
             .client
             .post(&url)
@@ -114,7 +121,7 @@ impl RaftNetwork<C> for NetworkConnection {
         InstallSnapshotResponse<u64>,
         RPCError<u64, BasicNode, RaftError<u64, InstallSnapshotError>>,
     > {
-        let url = self.url("/raft/snapshot");
+        let url = self.raft_url("snapshot");
         let resp: Result<InstallSnapshotResponse<u64>, RaftError<u64, InstallSnapshotError>> = self
             .client
             .post(&url)

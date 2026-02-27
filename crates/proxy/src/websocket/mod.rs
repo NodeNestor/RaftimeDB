@@ -2,7 +2,7 @@ mod handler;
 mod upstream;
 
 use crate::config::NodeConfig;
-use crate::raft::RaftNode;
+use crate::raft::RaftPool;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -19,12 +19,12 @@ use tracing::{error, info};
 /// - **Reads** (tag 0: Subscribe, tag 1: Unsubscribe, tag 2: OneOffQuery)
 ///   are forwarded directly — no consensus needed since all replicas have
 ///   identical state.
+///
+/// The proxy routes writes to the correct shard based on the module name
+/// extracted from the WebSocket path (e.g., `/database/subscribe/mymodule`).
 pub struct Proxy {
     config: NodeConfig,
-    raft: Arc<RaftNode>,
-    /// Broadcasts the database path (e.g. "/database/subscribe/mydb") to the
-    /// forwarder task so it can connect to SpacetimeDB with the correct URL.
-    db_path_tx: watch::Sender<String>,
+    pool: Arc<RaftPool>,
     /// Receives shutdown signal to stop accepting new connections.
     shutdown_rx: watch::Receiver<bool>,
 }
@@ -32,14 +32,12 @@ pub struct Proxy {
 impl Proxy {
     pub fn new(
         config: NodeConfig,
-        raft: RaftNode,
-        db_path_tx: watch::Sender<String>,
+        pool: Arc<RaftPool>,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
             config,
-            raft: Arc::new(raft),
-            db_path_tx,
+            pool,
             shutdown_rx,
         }
     }
@@ -54,13 +52,12 @@ impl Proxy {
             tokio::select! {
                 result = listener.accept() => {
                     let (stream, addr) = result?;
-                    let raft = self.raft.clone();
+                    let pool = self.pool.clone();
                     let stdb_url = self.config.stdb_url.clone();
-                    let db_path_tx = self.db_path_tx.clone();
                     let conn_shutdown = self.shutdown_rx.clone();
 
                     tokio::spawn(async move {
-                        match handler::handle_client(stream, raft, &stdb_url, db_path_tx, conn_shutdown).await {
+                        match handler::handle_client(stream, pool, &stdb_url, conn_shutdown).await {
                             Ok(()) => info!(%addr, "Client disconnected"),
                             Err(e) => error!(%addr, error = %e, "Client connection error"),
                         }

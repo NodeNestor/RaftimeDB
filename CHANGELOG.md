@@ -26,3 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Helm chart and K3s manifests for Kubernetes deployment
 - End-to-end Docker cluster test script
 - GitHub Actions CI for Linux, Windows, and macOS
+- Multi-shard (Multi-Raft) support — each SpacetimeDB module can run in its own Raft group for parallel write throughput
+- `RaftPool` replaces `RaftNode` — manages multiple Raft groups with per-shard state machines, forwarders, and log stores
+- Shard-aware Raft RPC routing (`/raft/{shard_id}/append`, `/raft/{shard_id}/vote`, `/raft/{shard_id}/snapshot`)
+- Shard management API: create shards, add/remove module routes, list shards, per-shard status
+- Shard configuration replicated via Raft consensus (0xFF magic byte in shard 0's log) — no external config store
+- Per-shard persistent log stores at `{data_dir}/shard-{id}/raft-log.redb` with automatic migration of legacy files
+- Module-based shard routing — WebSocket proxy extracts module name from path and routes writes to the correct shard
+- CLI shard commands: `create-shard`, `add-route`, `remove-route`, `list-shards`, `shard-status`
+- Membership changes (`add-node`/`remove-node`) now propagate to all active shards
+- Full backwards compatibility — existing single-shard clusters work with zero config changes (shard 0 is the default)

@@ -67,6 +67,56 @@ enum Commands {
         ])]
         servers: Vec<String>,
     },
+
+    /// Create a new shard (Raft group)
+    CreateShard {
+        /// Shard ID to create
+        #[arg(long)]
+        shard_id: u64,
+        /// Existing cluster node to send the request to
+        #[arg(long, default_value = "http://127.0.0.1:4001")]
+        cluster: String,
+    },
+
+    /// Add a module -> shard route
+    AddRoute {
+        /// Module/database name
+        #[arg(long)]
+        module: String,
+        /// Target shard ID
+        #[arg(long)]
+        shard_id: u64,
+        /// Existing cluster node to send the request to
+        #[arg(long, default_value = "http://127.0.0.1:4001")]
+        cluster: String,
+    },
+
+    /// Remove a module -> shard route
+    RemoveRoute {
+        /// Module/database name to unroute
+        #[arg(long)]
+        module: String,
+        /// Existing cluster node to send the request to
+        #[arg(long, default_value = "http://127.0.0.1:4001")]
+        cluster: String,
+    },
+
+    /// List all shards and routes
+    ListShards {
+        /// RaftTimeDB node address
+        #[arg(long, default_value = "http://127.0.0.1:4001")]
+        addr: String,
+    },
+
+    /// Show status for a specific shard
+    ShardStatus {
+        /// Shard ID to query
+        #[arg(long)]
+        shard_id: u64,
+        /// RaftTimeDB node address
+        #[arg(long, default_value = "http://127.0.0.1:4001")]
+        addr: String,
+    },
 }
 
 #[tokio::main]
@@ -95,6 +145,10 @@ async fn main() -> Result<()> {
             println!("  Term:       {}", status["current_term"]);
             println!("  Applied:    {}", status["last_applied"]);
             println!("  Membership: {}", status["membership"]);
+            if let Some(shards) = status["active_shards"].as_array() {
+                let shard_ids: Vec<String> = shards.iter().map(|v| v.to_string()).collect();
+                println!("  Shards:     [{}]", shard_ids.join(", "));
+            }
         }
 
         Commands::Init { nodes } => {
@@ -242,6 +296,134 @@ async fn main() -> Result<()> {
                 let body = resp.text().await.unwrap_or_default();
                 anyhow::bail!("Remove node failed: {}", body);
             }
+        }
+
+        Commands::CreateShard { shard_id, cluster } => {
+            let url = format!("{}/cluster/shards/create", cluster);
+            println!("Creating shard {} via {}...", shard_id, cluster);
+
+            let resp = client
+                .post(&url)
+                .json(&serde_json::json!({
+                    "shard_id": shard_id,
+                }))
+                .send()
+                .await
+                .context("Failed to connect to cluster")?;
+
+            if resp.status().is_success() {
+                println!("Shard {} created successfully!", shard_id);
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Create shard failed: {}", body);
+            }
+        }
+
+        Commands::AddRoute {
+            module,
+            shard_id,
+            cluster,
+        } => {
+            let url = format!("{}/cluster/shards/route", cluster);
+            println!(
+                "Adding route {} -> shard {} via {}...",
+                module, shard_id, cluster
+            );
+
+            let resp = client
+                .post(&url)
+                .json(&serde_json::json!({
+                    "module_name": module,
+                    "shard_id": shard_id,
+                }))
+                .send()
+                .await
+                .context("Failed to connect to cluster")?;
+
+            if resp.status().is_success() {
+                println!("Route {} -> shard {} added!", module, shard_id);
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Add route failed: {}", body);
+            }
+        }
+
+        Commands::RemoveRoute { module, cluster } => {
+            let url = format!("{}/cluster/shards/route", cluster);
+            println!("Removing route for {} via {}...", module, cluster);
+
+            let resp = client
+                .delete(&url)
+                .json(&serde_json::json!({
+                    "module_name": module,
+                }))
+                .send()
+                .await
+                .context("Failed to connect to cluster")?;
+
+            if resp.status().is_success() {
+                println!("Route for {} removed!", module);
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Remove route failed: {}", body);
+            }
+        }
+
+        Commands::ListShards { addr } => {
+            let url = format!("{}/cluster/shards", addr);
+            let resp = client
+                .get(&url)
+                .send()
+                .await
+                .context("Failed to connect to node")?;
+
+            let data: Value = resp
+                .json()
+                .await
+                .context("Failed to parse response")?;
+
+            println!("Active Shards:");
+            if let Some(shards) = data["shards"].as_array() {
+                for shard in shards {
+                    println!("  Shard {}", shard);
+                }
+            }
+
+            println!("\nRoutes:");
+            if let Some(routes) = data["routes"].as_object() {
+                if routes.is_empty() {
+                    println!("  (none — all modules go to shard 0)");
+                }
+                for (module, shard) in routes {
+                    println!("  {} -> shard {}", module, shard);
+                }
+            }
+        }
+
+        Commands::ShardStatus { shard_id, addr } => {
+            let url = format!("{}/cluster/shards/{}/status", addr, shard_id);
+            let resp = client
+                .get(&url)
+                .send()
+                .await
+                .context("Failed to connect to node")?;
+
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Shard status failed: {}", body);
+            }
+
+            let status: Value = resp
+                .json()
+                .await
+                .context("Failed to parse status response")?;
+
+            println!("Shard {} Status:", shard_id);
+            println!("  State:      {}", status["state"]);
+            println!("  Leader:     {}", status["current_leader"]);
+            println!("  Term:       {}", status["current_term"]);
+            println!("  Applied:    {}", status["last_applied"]);
+            println!("  Membership: {}", status["membership"]);
         }
     }
 

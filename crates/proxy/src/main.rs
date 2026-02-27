@@ -1,8 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
-use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
 mod api;
@@ -90,107 +88,21 @@ async fn main() -> Result<()> {
         tls_ca_cert: cli.tls_ca_cert,
     };
 
-    // Initialize the Raft node
-    let raft_node = raft::RaftNode::new(&config).await?;
-
     // Shutdown coordination: send `true` to signal all tasks to stop
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    // Set up the forwarder channel (state machine → SpacetimeDB)
-    // Channel carries (origin_node_id, raw_message) so we can skip writes
-    // that the local handler already forwarded to SpacetimeDB.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, Vec<u8>)>();
-    raft_node.state_machine.set_forwarder(tx);
-
-    // Watch channel: the first client connection broadcasts the database path
-    // (e.g. "/database/subscribe/mydb") so the forwarder knows what URL to use.
-    let (db_path_tx, mut db_path_rx) = tokio::sync::watch::channel(String::new());
-
-    // Spawn forwarder task: waits for the database path from the first client,
-    // then connects to SpacetimeDB and forwards committed writes from other nodes.
-    let self_node_id = config.node_id;
-    let stdb_url_for_forwarder = config.stdb_url.clone();
-    let mut forwarder_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move {
-        // Wait until a client connects and we learn the database path
-        loop {
-            tokio::select! {
-                result = db_path_rx.changed() => {
-                    if result.is_err() {
-                        return; // sender dropped
-                    }
-                    let path = db_path_rx.borrow().clone();
-                    if !path.is_empty() {
-                        info!(path = %path, "Forwarder: received database path from client");
-                        break;
-                    }
-                }
-                _ = forwarder_shutdown.changed() => {
-                    return;
-                }
-            }
-        }
-
-        let db_path = db_path_rx.borrow().clone();
-        let full_url = format!("{}{}", stdb_url_for_forwarder, db_path);
-
-        loop {
-            if *forwarder_shutdown.borrow() {
-                info!("Forwarder shutting down");
-                return;
-            }
-
-            match tokio_tungstenite::connect_async(&full_url).await {
-                Ok((ws, _)) => {
-                    info!(url = %full_url, "Forwarder connected to SpacetimeDB");
-                    let (mut ws_tx, _ws_rx): (futures_util::stream::SplitSink<_, Message>, _) = ws.split();
-
-                    loop {
-                        tokio::select! {
-                            msg = rx.recv() => {
-                                let Some((origin_node_id, data)) = msg else {
-                                    return;
-                                };
-
-                                // Skip writes from this node — the handler already
-                                // forwarded them through the client's connection
-                                if origin_node_id == self_node_id {
-                                    continue;
-                                }
-
-                                if let Err(e) = ws_tx.send(Message::Binary(data.into())).await {
-                                    warn!(error = %e, "Forwarder: SpacetimeDB send failed, reconnecting");
-                                    break;
-                                }
-                            }
-                            _ = forwarder_shutdown.changed() => {
-                                info!("Forwarder shutting down");
-                                return;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, url = %full_url, "Forwarder: SpacetimeDB connect failed, retrying in 1s");
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                }
-            }
-        }
-    });
+    // Initialize the RaftPool (creates shard 0, spawns forwarder + config listener)
+    let pool = raft::RaftPool::new(&config, shutdown_rx.clone()).await?;
 
     // Spawn metrics updater (periodically updates Raft metrics for Prometheus)
-    let raft_for_metrics = raft_node.raft.clone();
-    let node_id_for_metrics = config.node_id;
+    let pool_for_metrics = pool.clone();
     let mut metrics_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let m = raft_for_metrics.metrics().borrow().clone();
-                    metrics::RAFT_TERM.set(m.vote.leader_id().term as i64);
-                    let is_leader = m.current_leader == Some(node_id_for_metrics);
-                    metrics::RAFT_IS_LEADER.set(if is_leader { 1 } else { 0 });
+                    pool_for_metrics.update_metrics().await;
                 }
                 _ = metrics_shutdown.changed() => {
                     return;
@@ -211,10 +123,7 @@ async fn main() -> Result<()> {
 
     // Start the HTTP management API server on the raft address
     let app_state = Arc::new(api::AppState {
-        raft: raft_node.raft.clone(),
-        node_id: config.node_id,
-        peers: raft_node.peers.clone(),
-        http_scheme: config.http_scheme().to_string(),
+        pool: pool.clone(),
     });
     let http_router = api::router(app_state);
     let http_listener = tokio::net::TcpListener::bind(&cli.raft_addr).await?;
@@ -242,7 +151,7 @@ async fn main() -> Result<()> {
     };
 
     // Start the WebSocket proxy
-    let proxy = websocket::Proxy::new(config, raft_node, db_path_tx, shutdown_rx.clone());
+    let proxy = websocket::Proxy::new(config, pool, shutdown_rx.clone());
 
     // Run proxy until shutdown signal
     tokio::select! {

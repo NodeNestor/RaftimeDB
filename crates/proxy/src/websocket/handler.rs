@@ -1,5 +1,6 @@
 use crate::metrics;
-use crate::raft::RaftNode;
+use crate::raft::RaftPool;
+use crate::router;
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -34,9 +35,9 @@ pub enum MessageKind {
 /// Classify a WebSocket message by reading the BSATN tag byte.
 ///
 /// This is the core routing decision: one byte determines the entire path.
-/// - Tag 3 (CallReducer) and 4 (CallProcedure) are writes → Raft consensus
-/// - Tags 0-2 (Subscribe, Unsubscribe, OneOffQuery) are reads → direct forward
-/// - Everything else (ping/pong/close/text/empty) → pass through
+/// - Tag 3 (CallReducer) and 4 (CallProcedure) are writes -> Raft consensus
+/// - Tags 0-2 (Subscribe, Unsubscribe, OneOffQuery) are reads -> direct forward
+/// - Everything else (ping/pong/close/text/empty) -> pass through
 pub fn classify_message(msg: &Message) -> MessageKind {
     match msg {
         Message::Binary(data) if !data.is_empty() => {
@@ -70,8 +71,8 @@ pub fn is_known_tag(tag: u8) -> bool {
 }
 
 /// Build a close frame with leader hint for client reconnection.
-fn leader_close_frame(raft: &RaftNode) -> Option<CloseFrame> {
-    let (leader_id, leader_addr) = raft.current_leader()?;
+async fn leader_close_frame(pool: &RaftPool, shard_id: u64) -> Option<CloseFrame> {
+    let (leader_id, leader_addr) = pool.current_leader(shard_id).await?;
     Some(CloseFrame {
         code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Away,
         reason: format!("leader={}:{}", leader_id, leader_addr).into(),
@@ -81,22 +82,22 @@ fn leader_close_frame(raft: &RaftNode) -> Option<CloseFrame> {
 /// Handle a single client WebSocket connection.
 ///
 /// 1. Accept the client's WebSocket upgrade, extracting the request path
-/// 2. Open a corresponding connection to the local SpacetimeDB using the same path
-/// 3. For each message from the client:
+/// 2. Extract module name from path to determine shard routing
+/// 3. Open a corresponding connection to the local SpacetimeDB using the same path
+/// 4. For each message from the client:
 ///    - Classify via `classify_message` (reads one byte)
-///    - Write → propose through Raft, then forward
-///    - Read/PassThrough → forward directly
-/// 4. Relay all SpacetimeDB responses back to the client
+///    - Write -> propose through Raft (routed to correct shard), then forward
+///    - Read/PassThrough -> forward directly
+/// 5. Relay all SpacetimeDB responses back to the client
 pub async fn handle_client(
     stream: TcpStream,
-    raft: Arc<RaftNode>,
+    pool: Arc<RaftPool>,
     stdb_url: &str,
-    db_path_tx: tokio::sync::watch::Sender<String>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     metrics::CONNECTIONS_ACTIVE.inc();
 
-    let result = handle_client_inner(stream, raft.clone(), stdb_url, db_path_tx, shutdown).await;
+    let result = handle_client_inner(stream, pool.clone(), stdb_url, shutdown).await;
 
     metrics::CONNECTIONS_ACTIVE.dec();
     result
@@ -104,9 +105,8 @@ pub async fn handle_client(
 
 async fn handle_client_inner(
     stream: TcpStream,
-    raft: Arc<RaftNode>,
+    pool: Arc<RaftPool>,
     stdb_url: &str,
-    db_path_tx: tokio::sync::watch::Sender<String>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     // Extract the request URI path during the WebSocket handshake.
@@ -130,8 +130,16 @@ async fn handle_client_inner(
     let upstream_url = format!("{}{}", stdb_url, request_path);
     info!(path = %request_path, upstream = %upstream_url, "Client connected, opening upstream");
 
-    // Broadcast the database path so the forwarder can connect too
-    let _ = db_path_tx.send(request_path);
+    // Extract module name from path and determine shard
+    let module_name = router::extract_module_name(&request_path);
+    let shard_id = if let Some(name) = module_name {
+        pool.route_module(name).await
+    } else {
+        0 // default shard
+    };
+
+    // Broadcast the database path to the shard's forwarder
+    pool.send_db_path(shard_id, request_path).await;
 
     let (client_tx, mut client_rx) = client_ws.split();
     let client_tx = Arc::new(Mutex::new(client_tx));
@@ -140,8 +148,8 @@ async fn handle_client_inner(
     let (upstream_tx, mut upstream_rx) = upstream_ws.split();
     let upstream_tx = Arc::new(Mutex::new(upstream_tx));
 
-    // Client → Proxy → (Raft | direct) → SpacetimeDB
-    let raft_clone = raft.clone();
+    // Client -> Proxy -> (Raft | direct) -> SpacetimeDB
+    let pool_clone = pool.clone();
     let upstream_tx_clone = upstream_tx.clone();
     let inbound = tokio::spawn(async move {
         while let Some(msg) = client_rx.next().await {
@@ -158,10 +166,10 @@ async fn handle_client_inner(
             match kind {
                 MessageKind::Write => {
                     if let Message::Binary(data) = &msg {
-                        debug!(tag = data[0], len = data.len(), "Write → Raft consensus");
+                        debug!(tag = data[0], len = data.len(), shard_id, "Write -> Raft consensus");
                     }
                     if let Message::Binary(data) = &msg {
-                        if let Err(e) = raft_clone.propose_write(data.to_vec()).await {
+                        if let Err(e) = pool_clone.propose_write(shard_id, data.to_vec()).await {
                             warn!(error = %e, "Raft propose failed");
                             continue;
                         }
@@ -188,7 +196,7 @@ async fn handle_client_inner(
         }
     });
 
-    // SpacetimeDB → Proxy → Client
+    // SpacetimeDB -> Proxy -> Client
     let client_tx_clone = client_tx.clone();
     let outbound = tokio::spawn(async move {
         while let Some(msg) = upstream_rx.next().await {
@@ -213,7 +221,7 @@ async fn handle_client_inner(
         _ = shutdown.changed() => {
             info!("Shutdown signal received, closing client connection");
             // Send close frame with leader hint for reconnection
-            if let Some(close_frame) = leader_close_frame(&raft) {
+            if let Some(close_frame) = leader_close_frame(&pool, shard_id).await {
                 let _ = client_tx.lock().await
                     .send(Message::Close(Some(close_frame)))
                     .await;
