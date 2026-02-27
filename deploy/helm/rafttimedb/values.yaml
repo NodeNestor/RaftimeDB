@@ -3,7 +3,7 @@
 replicas: 3
 
 image:
-  repository: ghcr.io/YOUR_ORG/rafttimedb
+  repository: ghcr.io/nodenestor/rafttimedb
   tag: latest
   pullPolicy: IfNotPresent
 

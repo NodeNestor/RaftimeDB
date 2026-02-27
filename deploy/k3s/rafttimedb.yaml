@@ -63,7 +63,7 @@ spec:
       containers:
         # RaftTimeDB proxy
         - name: rafttimedb
-          image: ghcr.io/YOUR_ORG/rafttimedb:latest
+          image: ghcr.io/nodenestor/rafttimedb:latest
           ports:
             - containerPort: 3001
               name: ws

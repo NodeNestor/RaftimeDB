@@ -6,7 +6,7 @@
 
 Distributed, fault-tolerant clustering for [SpacetimeDB](https://spacetimedb.com) — automatic replication, failover, and horizontal scaling without modifying SpacetimeDB itself.
 
-[![CI](https://github.com/YOUR_ORG/RaftTimeDB/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_ORG/RaftTimeDB/actions)
+[![CI](https://github.com/NodeNestor/RaftimeDB/actions/workflows/ci.yml/badge.svg)](https://github.com/NodeNestor/RaftimeDB/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org)
 
@@ -37,7 +37,7 @@ Your app (unchanged)
 Spins up a 3-node cluster locally in seconds.
 
 ```bash
-git clone https://github.com/YOUR_ORG/RaftTimeDB.git
+git clone https://github.com/NodeNestor/RaftimeDB.git
 cd RaftTimeDB/deploy/docker
 docker compose up
 ```
@@ -46,7 +46,7 @@ Connect your SpacetimeDB client to `ws://localhost:3001` (or `:3002`, `:3003` �
 
 ### Option 2: Pre-built Binary
 
-Download from [Releases](https://github.com/YOUR_ORG/RaftTimeDB/releases) for your platform:
+Download from [Releases](https://github.com/NodeNestor/RaftimeDB/releases) for your platform:
 
 | Platform | Binary |
 |----------|--------|
@@ -132,12 +132,12 @@ docker run -p 3001:3001 -p 4001:4001 \
   -e RTDB_NODE_ID=1 \
   -e RTDB_STDB_URL=ws://host.docker.internal:3000 \
   -e RTDB_PEERS=node2:4001,node3:4001 \
-  ghcr.io/YOUR_ORG/rafttimedb:latest
+  ghcr.io/nodenestor/rafttimedb:latest
 ```
 
 ### Windows
 
-Download `rafttimedb.exe` from [Releases](https://github.com/YOUR_ORG/RaftTimeDB/releases) or build from source:
+Download `rafttimedb.exe` from [Releases](https://github.com/NodeNestor/RaftimeDB/releases) or build from source:
 
 ```powershell
 cargo build --release
@@ -186,7 +186,7 @@ spec:
     spec:
       containers:
         - name: rafttimedb
-          image: ghcr.io/YOUR_ORG/rafttimedb:latest
+          image: ghcr.io/nodenestor/rafttimedb:latest
           ports:
             - containerPort: 3001  # Client WebSocket
               name: ws
@@ -353,10 +353,10 @@ All options can be set via CLI flags or environment variables:
 - [x] In-memory log store
 - [x] Docker Compose (3-node local cluster)
 - [x] GitHub Actions CI (Linux, Windows, macOS)
+- [x] Cluster bootstrap and leader election
+- [x] Persistent log store (redb — pure Rust, ACID)
+- [x] End-to-end working demo
 - [ ] TCP transport for Raft inter-node communication
-- [ ] Cluster bootstrap and leader election
-- [ ] End-to-end working demo
-- [ ] RocksDB persistent log store
 
 ### Phase 2: Production Ready
 - [ ] Snapshot support (new node catch-up from SpacetimeDB state)

@@ -13,7 +13,7 @@ Thanks for your interest in contributing! RaftTimeDB is early-stage and there's 
 ### Building
 
 ```bash
-git clone https://github.com/YOUR_ORG/RaftTimeDB.git
+git clone https://github.com/NodeNestor/RaftimeDB.git
 cd RaftTimeDB
 cargo build
 ```
@@ -51,12 +51,12 @@ deploy/
 
 ## What Needs Work
 
-Check the [GitHub Issues](https://github.com/YOUR_ORG/RaftTimeDB/issues) for current priorities. The big areas:
+Check the [GitHub Issues](https://github.com/NodeNestor/RaftimeDB/issues) for current priorities. The big areas:
 
 ### Phase 1: Make It Work
+- ~~Cluster bootstrap (initial leader election)~~ Done
+- ~~Persistent log store (redb)~~ Done
 - TCP transport for Raft inter-node communication
-- Cluster bootstrap (initial leader election)
-- RocksDB-backed persistent log store
 - Snapshot support for node catch-up
 
 ### Phase 2: Make It Solid

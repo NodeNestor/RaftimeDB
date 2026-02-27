@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 type C = TypeConfig;
 
 /// In-memory log store for development/testing.
-/// TODO: Replace with RocksDB-backed store for production.
+/// Production uses PersistentLogStore (redb). Kept for reference.
 #[derive(Clone, Default)]
 pub struct LogStore {
     inner: Arc<Mutex<LogStoreInner>>,
